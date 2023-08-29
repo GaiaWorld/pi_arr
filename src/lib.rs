@@ -146,7 +146,7 @@ impl<T: Null> Arr<T> {
             return Arr {
                 buckets: buckets.map(Bucket::new),
                 lock: ShareMutex::default(),
-            }
+            };
         }
         let init = Location::of(capacity).bucket;
         for (i, bucket) in buckets[..=init].iter_mut().enumerate() {
