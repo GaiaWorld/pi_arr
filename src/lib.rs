@@ -99,16 +99,16 @@ impl<T> Default for Entry<T> {
 /// `Arr<T>` is quite large. It is expected that you
 /// store it behind an [`Arc`](std::sync::Arc) or similar.
 #[derive(Default)]
-pub struct Arr<T: Default> {
+pub struct Arr<T: Null> {
     // buckets of length 32, 64 .. 2^32
     buckets: [Bucket<T>; BUCKETS],
     lock: ShareMutex<()>,
 }
 
-unsafe impl<T: Send + Default> Send for Arr<T> {}
-unsafe impl<T: Sync + Default> Sync for Arr<T> {}
+unsafe impl<T: Send + Null> Send for Arr<T> {}
+unsafe impl<T: Sync + Null> Sync for Arr<T> {}
 
-impl<T: Default> Arr<T> {
+impl<T: Null> Arr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
     /// # Examples
@@ -141,13 +141,14 @@ impl<T: Default> Arr<T> {
     /// arr.set(33, 33);
     /// ```
     pub fn with_capacity(capacity: usize) -> Arr<T> {
+        let mut buckets = [ptr::null_mut(); BUCKETS];
         if capacity == 0 {
-            return Default::default();
+            return Arr {
+                buckets: buckets.map(Bucket::new),
+                lock: ShareMutex::default(),
+            }
         }
         let init = Location::of(capacity).bucket;
-
-        let mut buckets = [ptr::null_mut(); BUCKETS];
-
         for (i, bucket) in buckets[..=init].iter_mut().enumerate() {
             let len = Location::bucket_len(i);
             *bucket = Bucket::alloc(len);
@@ -473,21 +474,21 @@ impl<T: Default> Arr<T> {
     }
 }
 
-impl<T: Default> Index<usize> for Arr<T> {
+impl<T: Null> Index<usize> for Arr<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("no element found at index {index}")
     }
 }
-impl<T: Default> IndexMut<usize> for Arr<T> {
+impl<T: Null> IndexMut<usize> for Arr<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index)
             .expect("no element found at index_mut {index}")
     }
 }
 
-impl<T: Default> Drop for Arr<T> {
+impl<T: Null> Drop for Arr<T> {
     fn drop(&mut self) {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             let entries = *bucket.entries.get_mut();
@@ -501,7 +502,7 @@ impl<T: Default> Drop for Arr<T> {
     }
 }
 
-impl<T: Default> FromIterator<T> for Arr<T> {
+impl<T: Null> FromIterator<T> for Arr<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
 
@@ -517,7 +518,7 @@ impl<T: Default> FromIterator<T> for Arr<T> {
     }
 }
 
-impl<T: Default> Extend<T> for Arr<T> {
+impl<T: Null> Extend<T> for Arr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
@@ -529,7 +530,7 @@ impl<T: Default> Extend<T> for Arr<T> {
     }
 }
 
-impl<T: Clone + Default> Clone for Arr<T> {
+impl<T: Clone + Null> Clone for Arr<T> {
     fn clone(&self) -> Arr<T> {
         let mut buckets = [ptr::null_mut(); BUCKETS];
 
@@ -554,13 +555,13 @@ impl<T: Clone + Default> Clone for Arr<T> {
     }
 }
 
-impl<T: fmt::Debug + Default> fmt::Debug for Arr<T> {
+impl<T: fmt::Debug + Null> fmt::Debug for Arr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl<T: PartialEq + Default> PartialEq for Arr<T> {
+impl<T: PartialEq + Null> PartialEq for Arr<T> {
     fn eq(&self, other: &Self) -> bool {
         if self.len() != other.len() {
             return false;
@@ -577,7 +578,7 @@ impl<T: PartialEq + Default> PartialEq for Arr<T> {
     }
 }
 
-impl<A, T: Default> PartialEq<A> for Arr<T>
+impl<A, T: Null> PartialEq<A> for Arr<T>
 where
     A: AsRef<[T]>,
     T: PartialEq,
@@ -600,19 +601,19 @@ where
     }
 }
 
-impl<T: Eq + Default> Eq for Arr<T> {}
+impl<T: Eq + Null> Eq for Arr<T> {}
 
 /// An iterator over the elements of a [`Arr<T>`].
 ///
 /// See [`Arr::iter`] for details.
-pub struct Iter<'a, T: Default> {
+pub struct Iter<'a, T: Null> {
     arr: &'a Arr<T>,
     start: Location,
     end: Location,
     cur: *mut T,
     size: usize,
 }
-impl<'a, T: Default> Iterator for Iter<'a, T> {
+impl<'a, T: Null> Iterator for Iter<'a, T> {
     type Item = (usize, Entry<T>);
     fn next(&mut self) -> Option<Self::Item> {
         if self.size == 0 {
@@ -640,18 +641,18 @@ impl<'a, T: Default> Iterator for Iter<'a, T> {
 }
 
 #[derive(Default)]
-struct Bucket<T: Default> {
+struct Bucket<T: Null> {
     entries: SharePtr<T>,
 }
 
-impl<T: Default> Bucket<T> {
+impl<T: Null> Bucket<T> {
     fn new(entries: *mut T) -> Bucket<T> {
         Bucket {
             entries: SharePtr::new(entries),
         }
     }
     fn alloc(len: usize) -> *mut T {
-        let entries = (0..len).map(|_| T::default()).collect::<Box<[T]>>();
+        let entries = (0..len).map(|_| T::null()).collect::<Box<[T]>>();
         Box::into_raw(entries) as _
     }
     fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut T {
@@ -809,19 +810,19 @@ mod tests {
         let arr = Arc::new(crate::Arr::new());
 
         // insert an element
-        arr.set(0, Mutex::new(1));
+        arr.set(0, Some(Mutex::new(1)));
 
         let thread = std::thread::spawn({
             let arr = arr.clone();
             move || {
                 // mutate through the mutex
-                *arr[0].lock().unwrap() += 1;
+                *(arr[0].as_ref().unwrap().lock().unwrap()) += 1;
             }
         });
 
         thread.join().unwrap();
 
-        let x = arr[0].lock().unwrap();
+        let x = arr[0].as_ref().unwrap().lock().unwrap();
         assert_eq!(*x, 2);
     }
     #[test]
