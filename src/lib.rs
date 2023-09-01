@@ -234,7 +234,7 @@ impl<T: Null> Arr<T> {
         let location = Location::of(index);
 
         // safety: caller guarantees the entry is initialized
-        unsafe { &*self.entries(location.bucket).add(location.entry) }
+        &*self.entries(location.bucket).add(location.entry)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -289,14 +289,61 @@ impl<T: Null> Arr<T> {
         let location = Location::of(index);
 
         // safety: caller guarantees the entry is initialized
-        unsafe {
-            &mut *self
-                .buckets
-                .get_unchecked_mut(location.bucket)
-                .entries
-                .get_mut()
-                .add(location.entry)
+        &mut *self
+            .buckets
+            .get_unchecked_mut(location.bucket)
+            .entries
+            .get_mut()
+            .add(location.entry)
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(Some(&mut 40), arr.index_mut(1));
+    /// assert_eq!(None, arr.index_mut(33));
+    /// ```
+    pub fn index_mut(&self, index: usize) -> Option<&mut T> {
+        let location = Location::of(index);
+
+        // safety: `location.bucket` is always in bounds
+        let entries = self.entries(location.bucket);
+
+        // bucket is uninitialized
+        if entries.is_null() {
+            return None;
         }
+
+        // safety: `location.entry` is always in bounds for it's bucket
+        Some(unsafe { &mut *entries.add(location.entry) })
+    }
+
+    /// Returns a mutable reference to an element, without doing bounds
+    /// checking or verifying that the element is fully initialized.
+    ///
+    /// For a safe alternative see [`get`](Arr::get).
+    ///
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is **undefined
+    /// behavior**, even if the resulting reference is not used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let arr = pi_arr::arr![1, 2, 4];
+    ///
+    /// unsafe {
+    ///     assert_eq!(arr.index_unchecked_mut(1), &mut 2);
+    /// }
+    /// ```
+    pub unsafe fn index_unchecked_mut(&self, index: usize) -> &mut T {
+        let location = Location::of(index);
+        // safety: caller guarantees the entry is initialized
+        &mut *self.entries(location.bucket).add(location.entry)
     }
 
     /// Returns a mutable reference to the element at the given index.
