@@ -303,10 +303,10 @@ impl<T: Null> Arr<T> {
     ///
     /// ```
     /// let arr = pi_arr::arr![10, 40, 30];
-    /// assert_eq!(Some(&mut 40), arr.index_mut(1));
-    /// assert_eq!(None, arr.index_mut(33));
+    /// assert_eq!(Some(&mut 40), arr.mut_index(1));
+    /// assert_eq!(None, arr.mut_index(33));
     /// ```
-    pub fn index_mut(&self, index: usize) -> Option<&mut T> {
+    pub fn mut_index(&self, index: usize) -> Option<&mut T> {
         let location = Location::of(index);
 
         // safety: `location.bucket` is always in bounds
@@ -337,10 +337,10 @@ impl<T: Null> Arr<T> {
     /// let arr = pi_arr::arr![1, 2, 4];
     ///
     /// unsafe {
-    ///     assert_eq!(arr.index_unchecked_mut(1), &mut 2);
+    ///     assert_eq!(arr.unchecked_mut_index(1), &mut 2);
     /// }
     /// ```
-    pub unsafe fn index_unchecked_mut(&self, index: usize) -> &mut T {
+    pub unsafe fn unchecked_mut_index(&self, index: usize) -> &mut T {
         let location = Location::of(index);
         // safety: caller guarantees the entry is initialized
         &mut *self.entries(location.bucket).add(location.entry)
