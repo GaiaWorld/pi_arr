@@ -640,32 +640,40 @@ pub struct Iter<'a, T: Null> {
 impl<'a, T: Null> Iterator for Iter<'a, T> {
     type Item = (usize, &'a mut T);
     fn next(&mut self) -> Option<Self::Item> {
-        if self.size == 0 {
-            return None;
-        }
-        // 用size来保护self.start.entry不越过self.end.entry
-        self.size -= 1;
-        if self.start.entry < self.start.bucket_len {
-            let r = unsafe { self.bucket_ptr.add(self.start.entry) };
-            let index = self.start.entry;
-            self.start.entry += 1;
-            return Some((self.bucket_index + index, unsafe { &mut *r }));
-        }
-        self.start.up();
-        self.bucket_index = self.start.bucket_index();
-        while self.start.bucket <= self.end.bucket {
-            self.bucket_ptr = self.arr.entries(self.start.bucket);
-            if !self.bucket_ptr.is_null() {
-                break;
+        loop {
+            if self.size == 0 {
+                return None;
+            }
+            // 用size来保护self.start.entry不越过self.end.entry
+            self.size -= 1;
+            if self.start.entry < self.start.bucket_len {
+                let r = unsafe { &mut *self.bucket_ptr.add(self.start.entry) };
+                let index = self.start.entry;
+                self.start.entry += 1;
+                if r.is_null() {
+                    continue;
+                }
+                return Some((self.bucket_index + index, r));
             }
             self.start.up();
             self.bucket_index = self.start.bucket_index();
+            while self.start.bucket <= self.end.bucket {
+                self.bucket_ptr = self.arr.entries(self.start.bucket);
+                if !self.bucket_ptr.is_null() {
+                    break;
+                }
+                self.start.up();
+                self.bucket_index = self.start.bucket_index();
+            }
+            self.start.entry += 1;
+            let r = unsafe { &mut *self.bucket_ptr };
+            if !r.is_null() {
+                return Some((self.bucket_index, r));
+            }
         }
-        self.start.entry += 1;
-        Some((self.bucket_index, unsafe { &mut *self.bucket_ptr }))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.size, Some(self.size))
+        (0, Some(self.size))
     }
 }
 
@@ -801,6 +809,7 @@ mod tests {
         assert_eq!(arr[2], 3);
 
         let arr = crate::arr![1, 2, 4];
+        arr.set(1111, 1111);
         let mut iterator = arr.iter();
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (0, 1));
@@ -809,8 +818,9 @@ mod tests {
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (2, 4));
         let r = iterator.next().unwrap();
-        assert_eq!((r.0, r.1.is_null()), (3, true));
-        assert_eq!(iterator.size_hint().0, 32 - 4);
+        assert_eq!((r.0, *r.1), (1111, 1111));
+        assert_eq!(iterator.next(), None);
+        assert_eq!(iterator.size_hint().0, 0);
 
         let mut iterator = arr.slice(1..3);
         let r = iterator.next().unwrap();
