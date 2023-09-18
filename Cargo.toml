@@ -1,6 +1,6 @@
 [package]
 name = "pi_arr"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["zmax <zmax@gaia.world>"]
 edition = "2021"
 description = "lock-free & auto-expansion array"

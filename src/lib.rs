@@ -1,8 +1,10 @@
-use std::fmt;
-use std::mem::replace;
+#![feature(vec_into_raw_parts)]
+
+use std::marker::PhantomData;
+use std::mem::{forget, replace};
 use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::Ordering;
-use std::{ptr, slice};
+use std::{ptr, fmt, mem};
 
 use pi_null::Null;
 use pi_share::{ShareMutex, SharePtr};
@@ -58,9 +60,8 @@ macro_rules! arr {
 /// store it behind an [`Arc`](std::sync::Arc) or similar.
 #[derive(Default)]
 pub struct Arr<T: Null> {
-    // buckets of length 32, 64 .. 2^32
-    buckets: [Bucket<T>; BUCKETS],
-    lock: ShareMutex<()>,
+    raw: RawArr,
+    _k: PhantomData<T>,
 }
 
 unsafe impl<T: Send + Null> Send for Arr<T> {}
@@ -99,22 +100,9 @@ impl<T: Null> Arr<T> {
     /// arr.set(33, 33);
     /// ```
     pub fn with_capacity(capacity: usize) -> Arr<T> {
-        let mut buckets = [ptr::null_mut(); BUCKETS];
-        if capacity == 0 {
-            return Arr {
-                buckets: buckets.map(Bucket::new),
-                lock: ShareMutex::default(),
-            };
-        }
-        let init = Location::of(capacity).bucket;
-        for (i, bucket) in buckets[..=init].iter_mut().enumerate() {
-            let len = Location::bucket_len(i);
-            *bucket = Bucket::alloc(len);
-        }
-
         Arr {
-            buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
+            raw: RawArr::with_capacity(capacity, Self::initialize, mem::size_of::<T>()),
+            _k: PhantomData,
         }
     }
     /// Returns the number of elements in the array.
@@ -132,16 +120,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(arr.len(), 32);
     /// ```
     pub fn len(&self) -> usize {
-        let mut len = 0;
-        for i in 0..self.buckets.len() {
-            let entries = self.entries(i);
-            // bucket is uninitialized
-            if entries.is_null() {
-                continue;
-            }
-            len += Location::bucket_len(i);
-        }
-        len
+        self.raw.len()
     }
 
     /// Returns a reference to the element at the given index.
@@ -154,18 +133,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.get(33));
     /// ```
     pub fn get(&self, index: usize) -> Option<&T> {
-        let location = Location::of(index);
-
-        // safety: `location.bucket` is always in bounds
-        let entries = self.entries(location.bucket);
-
-        // bucket is uninitialized
-        if entries.is_null() {
-            return None;
-        }
-
-        // safety: `location.entry` is always in bounds for it's bucket
-        Some(unsafe { &*entries.add(location.entry) })
+        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
     }
 
     /// Returns a reference to an element, without doing bounds
@@ -189,10 +157,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        let location = Location::of(index);
-
-        // safety: caller guarantees the entry is initialized
-        &*self.entries(location.bucket).add(location.entry)
+        &*(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -205,23 +170,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.get_mut(33));
     /// ```
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        let location = Location::of(index);
-
-        // safety: `location.bucket` is always in bounds
-        let entries = unsafe {
-            self.buckets
-                .get_unchecked_mut(location.bucket)
-                .entries
-                .get_mut()
-        };
-
-        // bucket is uninitialized
-        if entries.is_null() {
-            return None;
-        }
-
-        // safety: `location.entry` is always in bounds for it's bucket
-        Some(unsafe { &mut *entries.add(location.entry) })
+        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
     }
 
     /// Returns a mutable reference to an element, without doing bounds
@@ -244,15 +193,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
-        let location = Location::of(index);
-
-        // safety: caller guarantees the entry is initialized
-        &mut *self
-            .buckets
-            .get_unchecked_mut(location.bucket)
-            .entries
-            .get_mut()
-            .add(location.entry)
+        &mut *(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
     }
     /// Returns a mutable reference to the element at the given index.
     /// If the bucket corresponding to the index is not allocated,
@@ -263,22 +204,16 @@ impl<T: Null> Arr<T> {
     /// ```
     /// let mut arr = pi_arr::arr![10, 40, 30];
     /// let arr = pi_arr::arr![10, 40, 30];
-    /// assert_eq!(40, *arr.get_alloc_mut(1));
-    /// assert_eq!(true, arr.get_alloc_mut(3).is_null());
+    /// assert_eq!(40, *arr.get_alloc(1));
+    /// assert_eq!(true, arr.get_alloc(3).is_null());
     /// ```
-    pub fn get_alloc_mut(&mut self, index: usize) -> &mut T {
-        let location = Location::of(index);
-        let bucket = unsafe { self.buckets.get_unchecked_mut(location.bucket) };
-        // safety: `location.bucket` is always in bounds
-        let mut entries = *bucket.entries.get_mut();
-
-        // bucket is uninitialized
-        if entries.is_null() {
-            entries = Bucket::alloc(location.bucket_len);
+    pub fn get_alloc(&mut self, index: usize) -> &mut T {
+        unsafe {
+            &mut *(self
+                .raw
+                .get_alloc(index, Self::initialize, mem::size_of::<T>())
+                as *mut T)
         }
-
-        // safety: `location.entry` is always in bounds for it's bucket
-        unsafe { &mut *entries.add(location.entry) }
     }
     /// set element at the given index.
     ///
@@ -290,7 +225,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(true, arr.set(33, 5).is_null());
     /// ```
     pub fn set(&mut self, index: usize, value: T) -> T {
-        replace(self.get_alloc_mut(index), value)
+        replace(self.get_alloc(index), value)
     }
     /// Returns a mutable reference to the element at the given index.
     /// If the bucket corresponding to the index is not allocated,
@@ -306,18 +241,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.load(33));
     /// ```
     pub fn load(&self, index: usize) -> Option<&mut T> {
-        let location = Location::of(index);
-
-        // safety: `location.bucket` is always in bounds
-        let entries = self.entries(location.bucket);
-
-        // bucket is uninitialized
-        if entries.is_null() {
-            return None;
-        }
-
-        // safety: `location.entry` is always in bounds for it's bucket
-        Some(unsafe { &mut *entries.add(location.entry) })
+        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
     }
 
     /// Returns a mutable reference to an element, without doing bounds
@@ -340,9 +264,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn load_unchecked(&self, index: usize) -> &mut T {
-        let location = Location::of(index);
-        // safety: caller guarantees the entry is initialized
-        &mut *self.entries(location.bucket).add(location.entry)
+        &mut *(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -356,16 +278,12 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(true, arr.load_alloc(3).is_null());
     /// ```
     pub fn load_alloc(&self, index: usize) -> &mut T {
-        let location = Location::of(index);
-        let bucket = unsafe { self.buckets.get_unchecked(location.bucket) };
-        // safety: `location.bucket` is always in bounds
-        let mut entries = bucket.entries.load(Ordering::Acquire);
-        // bucket is uninitialized
-        if entries.is_null() {
-            entries = bucket.init(location.bucket_len, &self.lock);
+        unsafe {
+            &mut *(self
+                .raw
+                .load_alloc(index, Self::initialize, mem::size_of::<T>())
+                as *mut T)
         }
-        // safety: `location.entry` is always in bounds for it's bucket
-        unsafe { &mut *entries.add(location.entry) }
     }
 
     /// insert an element at the given index.
@@ -381,7 +299,7 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline]
     pub fn insert(&self, index: usize, value: T) -> T {
-        replace(&mut *self.load_alloc(index), value)
+        replace(self.load_alloc(index), value)
     }
     /// clear and free buckets.
     ///
@@ -396,14 +314,14 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(arr[2], 3);
     /// ```
     pub fn clear(&self) {
-        for (i, bucket) in self.buckets.iter().enumerate() {
-            let entries = bucket.entries.load(Ordering::Acquire);
+        for (i, bucket) in self.raw.buckets.iter().enumerate() {
+            let entries = bucket.entries.load(Ordering::Acquire) as *mut T;
             if entries.is_null() {
                 continue;
             }
             let len = Location::bucket_len(i);
             // safety: in drop
-            unsafe { drop(Box::from_raw(slice::from_raw_parts_mut(entries, len))) }
+            unsafe { drop(Vec::from_raw_parts(entries, len, len)) }
         }
     }
     /// Returns an iterator over the array.
@@ -450,55 +368,44 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(iterator.next(), None);
     /// ```
     pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
-        let mut start = Location::of(range.start);
-        let mut end = Location::of(range.end);
-        let mut bucket_ptr = ptr::null_mut();
-        while start.bucket <= end.bucket {
-            bucket_ptr = self.entries(start.bucket);
-            if !bucket_ptr.is_null() {
-                break;
-            }
-            start.up();
-        }
-        let bucket_index = start.bucket_index();
-        while end.bucket > start.bucket {
-            let entries = self.entries(end.bucket);
-            if !entries.is_null() {
-                break;
-            }
-            end.down();
-        }
-        let size = if start.bucket < end.bucket {
-            let mut size = end.entry + start.bucket_len - start.entry;
-            for bucket in (start.bucket + 1)..end.bucket {
-                let entries = self.entries(bucket);
-                if !entries.is_null() {
-                    size += Location::bucket_len(bucket);
-                }
-            }
-            size
-        } else if end.bucket == end.bucket {
-            end.entry.checked_sub(start.entry).unwrap_or(0)
-        } else {
-            0
-        };
         Iter {
-            arr: &self,
-            start,
-            end,
-            bucket_ptr,
-            bucket_index,
-            size,
+            raw: self.raw.slice(range, mem::size_of::<T>()),
+            _k: PhantomData,
         }
     }
     #[inline]
-    fn entries(&self, bucket: usize) -> *mut T {
-        unsafe {
-            self.buckets
-                .get_unchecked(bucket)
-                .entries
-                .load(Ordering::Acquire)
+    fn initialize(ptr: *mut u8, size: usize, len: usize) {
+        let mut index = 0;
+        while index < len {
+            unsafe {
+                let p = ptr.add(index) as *mut T;
+                std::ptr::write(p, T::null());
+            }
+            index += size;
         }
+    }
+}
+
+/// An iterator over the elements of a [`Arr<T>`].
+///
+/// See [`Arr::iter`] for details.
+pub struct Iter<'a, T: 'a + Null> {
+    raw: RawIter<'a>,
+    _k: PhantomData<T>,
+}
+impl<'a, T: Null> Iterator for Iter<'a, T> {
+    type Item = (usize, &'a mut T);
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(r) = self.raw.next() {
+            let r: (usize, &mut T) = unsafe { mem::transmute(r) };
+            if !r.1.is_null() {
+                return Some(r);
+            }
+        }
+        None
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.raw.size_hint()
     }
 }
 
@@ -518,14 +425,14 @@ impl<T: Null> IndexMut<usize> for Arr<T> {
 
 impl<T: Null> Drop for Arr<T> {
     fn drop(&mut self) {
-        for (i, bucket) in self.buckets.iter_mut().enumerate() {
-            let entries = *bucket.entries.get_mut();
+        for (i, bucket) in self.raw.buckets.iter_mut().enumerate() {
+            let entries = *bucket.entries.get_mut() as *mut T;
             if entries.is_null() {
                 continue;
             }
             let len = Location::bucket_len(i);
             // safety: in drop
-            unsafe { drop(Box::from_raw(slice::from_raw_parts_mut(entries, len))) }
+            unsafe { drop(Vec::from_raw_parts(entries, len, len)) }
         }
     }
 }
@@ -537,7 +444,7 @@ impl<T: Null> FromIterator<T> for Arr<T> {
         let (lower, _) = iter.size_hint();
         let mut arr = Arr::with_capacity(lower);
         for (i, value) in iter.enumerate() {
-            *arr.get_alloc_mut(i) = value;
+            *arr.get_alloc(i) = value;
         }
         arr
     }
@@ -547,7 +454,7 @@ impl<T: Null> Extend<T> for Arr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
-            *self.get_alloc_mut(i) = value;
+            *self.get_alloc(i) = value;
         }
     }
 }
@@ -557,22 +464,23 @@ impl<T: Clone + Null> Clone for Arr<T> {
         let mut buckets = [ptr::null_mut(); BUCKETS];
 
         for (i, bucket) in buckets.iter_mut().enumerate() {
-            let entries = self.entries(i);
-
+            let entries = self.raw.entries(i) as *mut T;
             // bucket is uninitialized
             if entries.is_null() {
                 continue;
             }
             let len = Location::bucket_len(i);
-            *bucket = Bucket::alloc(len);
-            unsafe {
-                ptr::copy(entries, *bucket, len);
-            }
+            let vec = unsafe { Vec::from_raw_parts(entries, len, len) };
+            *bucket = vec.clone().into_raw_parts().0 as *mut u8;
+            forget(vec);
         }
 
         Arr {
-            buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
+            raw: RawArr {
+                buckets: buckets.map(Bucket::new),
+                lock: ShareMutex::default(),
+            },
+            _k: PhantomData,
         }
     }
 }
@@ -625,80 +533,238 @@ where
 
 impl<T: Eq + Null> Eq for Arr<T> {}
 
-/// An iterator over the elements of a [`Arr<T>`].
-///
-/// See [`Arr::iter`] for details.
-pub struct Iter<'a, T: Null> {
-    arr: &'a Arr<T>,
-    start: Location,
-    end: Location,
-    bucket_ptr: *mut T,
-    bucket_index: usize,
-    size: usize,
+#[derive(Default)]
+pub struct RawArr {
+    // buckets of length 32, 64 .. 2^32
+    buckets: [Bucket; BUCKETS],
+    lock: ShareMutex<()>,
 }
-impl<'a, T: Null> Iterator for Iter<'a, T> {
-    type Item = (usize, &'a mut T);
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.size == 0 {
-                return None;
-            }
-            // 用size来保护self.start.entry不越过self.end.entry
-            self.size -= 1;
-            if self.start.entry < self.start.bucket_len {
-                let r = unsafe { &mut *self.bucket_ptr.add(self.start.entry) };
-                let index = self.start.entry;
-                self.start.entry += 1;
-                if r.is_null() {
-                    continue;
-                }
-                return Some((self.bucket_index + index, r));
-            }
-            self.start.up();
-            self.bucket_index = self.start.bucket_index();
-            while self.start.bucket <= self.end.bucket {
-                self.bucket_ptr = self.arr.entries(self.start.bucket);
-                if !self.bucket_ptr.is_null() {
-                    break;
-                }
-                self.start.up();
-                self.bucket_index = self.start.bucket_index();
-            }
-            self.start.entry += 1;
-            let r = unsafe { &mut *self.bucket_ptr };
-            if !r.is_null() {
-                return Some((self.bucket_index, r));
-            }
+
+impl RawArr {
+    pub fn with_capacity(
+        capacity: usize,
+        init: fn(*mut u8, usize, usize),
+        type_size: usize,
+    ) -> RawArr {
+        let mut buckets = [ptr::null_mut(); BUCKETS];
+        if capacity == 0 {
+            return RawArr {
+                buckets: buckets.map(Bucket::new),
+                lock: ShareMutex::default(),
+            };
+        }
+        let end = Location::of(capacity).bucket;
+        for (i, bucket) in buckets[..=end].iter_mut().enumerate() {
+            let len = Location::bucket_len(i);
+            *bucket = Bucket::alloc(len * type_size, init, type_size);
+        }
+
+        RawArr {
+            buckets: buckets.map(Bucket::new),
+            lock: ShareMutex::default(),
         }
     }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.size))
+    pub fn len(&self) -> usize {
+        let mut len = 0;
+        for i in 0..self.buckets.len() {
+            let entries = self.entries(i);
+            // bucket is uninitialized
+            if entries.is_null() {
+                continue;
+            }
+            len += Location::bucket_len(i);
+        }
+        len
+    }
+    pub fn get(&self, index: usize, type_size: usize) -> Option<&u8> {
+        let location = Location::of(index);
+
+        // safety: `location.bucket` is always in bounds
+        let entries = self.entries(location.bucket);
+
+        // bucket is uninitialized
+        if entries.is_null() {
+            return None;
+        }
+
+        // safety: `location.entry` is always in bounds for it's bucket
+        Some(unsafe { &*entries.add(location.entry * type_size) })
+    }
+    pub unsafe fn get_unchecked(&self, index: usize, type_size: usize) -> *mut u8 {
+        let location = Location::of(index);
+
+        // safety: caller guarantees the entry is initialized
+        self.entries(location.bucket)
+            .add(location.entry * type_size)
+    }
+
+    pub unsafe fn get_alloc(
+        &mut self,
+        index: usize,
+        init: fn(*mut u8, usize, usize),
+        type_size: usize,
+    ) -> *mut u8 {
+        let location = Location::of(index);
+        let bucket = self.buckets.get_unchecked_mut(location.bucket);
+        // safety: `location.bucket` is always in bounds
+        let mut entries = *bucket.entries.get_mut();
+        // bucket is uninitialized
+        if entries.is_null() {
+            entries = Bucket::alloc(location.bucket_len * type_size, init, type_size);
+        }
+        // safety: `location.entry` is always in bounds for it's bucket
+        entries.add(location.entry * type_size)
+    }
+
+    pub unsafe fn load_alloc(
+        &self,
+        index: usize,
+        init: fn(*mut u8, usize, usize),
+        type_size: usize,
+    ) -> *mut u8 {
+        let location = Location::of(index);
+        let bucket = self.buckets.get_unchecked(location.bucket);
+        // safety: `location.bucket` is always in bounds
+        let mut entries = bucket.entries.load(Ordering::Acquire);
+        // bucket is uninitialized
+        if entries.is_null() {
+            entries = bucket.init(location.bucket_len * type_size, init, type_size, &self.lock);
+        }
+        // safety: `location.entry` is always in bounds for it's bucket
+        entries.add(location.entry * type_size)
+    }
+    pub fn iter(&self, type_size: usize) -> RawIter<'_> {
+        self.slice(0..MAX_ENTRIES, type_size)
+    }
+    pub fn slice(&self, range: Range<usize>, type_size: usize) -> RawIter<'_> {
+        let mut start = Location::of(range.start);
+        let mut end = Location::of(range.end);
+        let mut ptr = ptr::null_mut();
+        while start.bucket <= end.bucket {
+            ptr = self.entries(start.bucket);
+            if !ptr.is_null() {
+                ptr = unsafe { ptr.add(start.entry * type_size) };
+                break;
+            }
+            start.up();
+        }
+        let bucket_index = start.bucket_index();
+        while end.bucket > start.bucket {
+            let entries = self.entries(end.bucket);
+            if !entries.is_null() {
+                break;
+            }
+            end.down();
+        }
+        let amount = if start.bucket < end.bucket {
+            let mut size = end.entry + start.bucket_len - start.entry;
+            for bucket in (start.bucket + 1)..end.bucket {
+                let entries = self.entries(bucket);
+                if !entries.is_null() {
+                    size += Location::bucket_len(bucket);
+                }
+            }
+            size
+        } else if end.bucket == end.bucket {
+            end.entry.checked_sub(start.entry).unwrap_or(0)
+        } else {
+            0
+        };
+        RawIter {
+            arr: &self,
+            type_size,
+            start,
+            end,
+            ptr,
+            bucket_index,
+            amount,
+        }
+    }
+    #[inline]
+    fn entries(&self, bucket: usize) -> *mut u8 {
+        unsafe {
+            self.buckets
+                .get_unchecked(bucket)
+                .entries
+                .load(Ordering::Acquire)
+        }
     }
 }
 
 #[derive(Default)]
-struct Bucket<T: Null> {
-    entries: SharePtr<T>,
+struct Bucket {
+    entries: SharePtr<u8>,
 }
 
-impl<T: Null> Bucket<T> {
-    fn new(entries: *mut T) -> Bucket<T> {
+impl Bucket {
+    fn new(entries: *mut u8) -> Bucket {
         Bucket {
             entries: SharePtr::new(entries),
         }
     }
-    fn alloc(len: usize) -> *mut T {
-        let entries = (0..len).map(|_| T::null()).collect::<Box<[T]>>();
-        Box::into_raw(entries) as _
+    fn alloc(len: usize, init: fn(*mut u8, usize, usize), type_size: usize) -> *mut u8 {
+        let mut entries = Vec::with_capacity(len);
+        init(entries.as_mut_ptr(), type_size, len);
+        entries.into_raw_parts().0
     }
-    fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut T {
+    fn init(
+        &self,
+        len: usize,
+        init: fn(*mut u8, usize, usize),
+        type_size: usize,
+        lock: &ShareMutex<()>,
+    ) -> *mut u8 {
         let _lock = lock.lock();
         let mut ptr = self.entries.load(Ordering::Acquire);
         if ptr.is_null() {
-            ptr = Bucket::alloc(len);
+            ptr = Bucket::alloc(len, init, type_size);
             self.entries.store(ptr, Ordering::Release);
         }
         ptr
+    }
+}
+
+pub struct RawIter<'a> {
+    arr: &'a RawArr,
+    type_size: usize,
+    start: Location,
+    end: Location,
+    ptr: *mut u8,
+    bucket_index: usize,
+    amount: usize,
+}
+impl<'a> Iterator for RawIter<'a> {
+    type Item = (usize, &'a mut u8);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.amount == 0 {
+            return None;
+        }
+        // 用size来保护self.start.entry不越过self.end.entry
+        self.amount -= 1;
+        if self.start.entry < self.start.bucket_len {
+            let r = unsafe { &mut *self.ptr };
+            self.ptr = unsafe { self.ptr.add(self.type_size) };
+            let index = self.start.entry;
+            self.start.entry += 1;
+            return Some((self.bucket_index + index, r));
+        }
+        self.start.up();
+        self.bucket_index = self.start.bucket_index();
+        while self.start.bucket <= self.end.bucket {
+            self.ptr = self.arr.entries(self.start.bucket);
+            if !self.ptr.is_null() {
+                self.start.entry += 1;
+                let r = unsafe { &mut *self.ptr };
+                self.ptr = unsafe { self.ptr.add(self.type_size) };
+                return Some((self.bucket_index, r));
+            }
+            self.start.up();
+            self.bucket_index = self.start.bucket_index();
+        }
+        None
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.amount))
     }
 }
 
@@ -756,7 +822,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::*;
-
+    #[test]
+    fn test1() {
+        let arr: Arr<f64> = arr![1.0; 3];
+        assert_eq!(arr[0], 1.0);
+        assert_eq!(arr[1], 1.0);
+        assert_eq!(arr[2], 1.0);
+    }
     #[test]
     fn test() {
         let arr = arr![1; 3];
@@ -771,14 +843,16 @@ mod tests {
         assert_eq!(arr.len(), 32);
 
         let mut arr = arr![10, 40, 30];
-        assert_eq!(40, *arr.get_alloc_mut(1));
-        assert_eq!(true, arr.get_alloc_mut(3).is_null());
+        assert_eq!(40, *arr.get_alloc(1));
+        assert_eq!(true, arr.get_alloc(3).is_null());
         assert_eq!(40, arr.set(1, 20));
         assert_eq!(true, arr.set(33, 5).is_null());
 
-        let arr = arr![10, 40, 30];
-        assert_eq!(Some(&40), arr.get(1));
-        assert_eq!(None, arr.get(33));
+        {
+            let arr: Arr<i8> = arr![10, 40, 30];
+            assert_eq!(Some(&40), arr.get(1));
+            assert_eq!(None, arr.get(33));
+        }
 
         let arr = crate::arr![1, 2, 4];
         unsafe {
@@ -854,6 +928,23 @@ mod tests {
         for i in 0..6 {
             assert!(arr.iter().any(|(_, x)| x == &i));
         }
+    }
+    #[test]
+    fn test_arc1() {
+        let a1 = {
+            let arr = crate::Arr::new();
+            for i in 0..6 {
+                arr.insert(i, Some(Arc::new(i)));
+            }
+
+            for i in 0..6 {
+                assert_eq!(arr[i].as_ref().unwrap().as_ref(), &i);
+            }
+            let a2 = arr.clone();
+            assert_eq!(Arc::<usize>::strong_count(a2[0].as_ref().unwrap()), 2);
+            a2
+        };
+        assert_eq!(Arc::<usize>::strong_count(a1[0].as_ref().unwrap()), 1);
     }
     #[test]
     fn test_mutex() {
