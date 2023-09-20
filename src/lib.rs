@@ -733,6 +733,11 @@ pub struct RawIter<'a> {
     bucket_index: usize,
     amount: usize,
 }
+impl<'a> RawIter<'a> {
+    pub fn type_size(&self) -> usize {
+        self.type_size
+    }
+}
 impl<'a> Iterator for RawIter<'a> {
     type Item = (usize, *mut u8);
     fn next(&mut self) -> Option<Self::Item> {
