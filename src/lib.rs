@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::mem::{forget, replace};
 use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::Ordering;
-use std::{ptr, fmt, mem};
+use std::{fmt, mem, ptr};
 
 use pi_null::Null;
 use pi_share::{ShareMutex, SharePtr};
@@ -170,7 +170,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.get_mut(33));
     /// ```
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
+        unsafe { mem::transmute(self.raw.get_mut(index, mem::size_of::<T>())) }
     }
 
     /// Returns a mutable reference to an element, without doing bounds
@@ -193,7 +193,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
-        &mut *(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
+        &mut *(self.raw.get_unchecked_mut(index, mem::size_of::<T>()) as *mut T)
     }
     /// Returns a mutable reference to the element at the given index.
     /// If the bucket corresponding to the index is not allocated,
@@ -597,6 +597,21 @@ impl RawArr {
         self.entries(location.bucket)
             .add(location.entry * type_size)
     }
+    pub fn get_mut(&mut self, index: usize, type_size: usize) -> Option<&mut u8> {
+        let location = Location::of(index);
+        let entries = self.entries_mut(location.bucket);
+        // bucket is uninitialized
+        if entries.is_null() {
+            return None;
+        }
+        // safety: `location.entry` is always in bounds for it's bucket
+        Some(unsafe { &mut *entries.add(location.entry * type_size) })
+    }
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize, type_size: usize) -> *mut u8 {
+        let location = Location::of(index);
+        self.entries_mut(location.bucket)
+            .add(location.entry * type_size)
+    }
 
     pub unsafe fn get_alloc(
         &mut self,
@@ -688,6 +703,10 @@ impl RawArr {
                 .entries
                 .load(Ordering::Acquire)
         }
+    }
+    #[inline]
+    fn entries_mut(&mut self, bucket: usize) -> *mut u8 {
+        unsafe { *self.buckets.get_unchecked_mut(bucket).entries.get_mut() }
     }
 }
 
