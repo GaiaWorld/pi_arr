@@ -734,7 +734,7 @@ pub struct RawIter<'a> {
     amount: usize,
 }
 impl<'a> Iterator for RawIter<'a> {
-    type Item = (usize, &'a mut u8);
+    type Item = (usize, *mut u8);
     fn next(&mut self) -> Option<Self::Item> {
         if self.amount == 0 {
             return None;
@@ -742,7 +742,7 @@ impl<'a> Iterator for RawIter<'a> {
         // 用size来保护self.start.entry不越过self.end.entry
         self.amount -= 1;
         if self.start.entry < self.start.bucket_len {
-            let r = unsafe { &mut *self.ptr };
+            let r = self.ptr;
             self.ptr = unsafe { self.ptr.add(self.type_size) };
             let index = self.start.entry;
             self.start.entry += 1;
@@ -754,7 +754,7 @@ impl<'a> Iterator for RawIter<'a> {
             self.ptr = self.arr.entries(self.start.bucket);
             if !self.ptr.is_null() {
                 self.start.entry += 1;
-                let r = unsafe { &mut *self.ptr };
+                let r = self.ptr;
                 self.ptr = unsafe { self.ptr.add(self.type_size) };
                 return Some((self.bucket_index, r));
             }
