@@ -314,14 +314,13 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(arr[2], 3);
     /// ```
     pub fn clear(&self) {
-        for (i, bucket) in self.raw.buckets.iter().enumerate() {
-            let entries = bucket.entries.load(Ordering::Acquire) as *mut T;
+        for (i, entries) in self.raw.replace().into_iter().enumerate() {
             if entries.is_null() {
                 continue;
             }
             let len = Location::bucket_len(i);
             // safety: in drop
-            unsafe { drop(Vec::from_raw_parts(entries, len, len)) }
+            unsafe { drop(Vec::from_raw_parts(entries as *mut T, len, len)) }
         }
     }
     /// Returns an iterator over the array.
@@ -648,6 +647,15 @@ impl RawArr {
         // safety: `location.entry` is always in bounds for it's bucket
         entries.add(location.entry * type_size)
     }
+    pub fn replace(&self) -> [*mut u8; BUCKETS] {
+        let mut buckets = [ptr::null_mut(); BUCKETS];
+        let _lock = self.lock.lock();
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            *unsafe { buckets.get_unchecked_mut(i) } =
+                bucket.entries.swap(ptr::null_mut(), Ordering::Relaxed);
+        }
+        buckets
+    }
     pub fn iter(&self, type_size: usize) -> RawIter<'_> {
         self.slice(0..MAX_ENTRIES, type_size)
     }
@@ -848,10 +856,10 @@ mod tests {
     use crate::*;
     #[test]
     fn test1() {
-        let arr: Arr<f64> = arr![1.0; 3];
-        assert_eq!(arr[0], 1.0);
-        assert_eq!(arr[1], 1.0);
-        assert_eq!(arr[2], 1.0);
+        let arr: Arr<u8> = arr![1; 3];
+        assert_eq!(arr[0], 1);
+        assert_eq!(arr[1], 1);
+        assert_eq!(arr[2], 1);
     }
     #[test]
     fn test() {
