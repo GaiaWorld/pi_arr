@@ -314,11 +314,10 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(arr[2], 3);
     /// ```
     pub fn clear(&self) {
-        for (i, entries) in self.raw.replace().into_iter().enumerate() {
+        for (entries, len) in self.raw.replace().into_iter() {
             if entries.is_null() {
                 continue;
             }
-            let len = Location::bucket_len(i);
             // safety: in drop
             unsafe { drop(Vec::from_raw_parts(entries as *mut T, len, len)) }
         }
@@ -647,12 +646,13 @@ impl RawArr {
         // safety: `location.entry` is always in bounds for it's bucket
         entries.add(location.entry * type_size)
     }
-    pub fn replace(&self) -> [*mut u8; BUCKETS] {
-        let mut buckets = [ptr::null_mut(); BUCKETS];
+    pub fn replace(&self) -> [(*mut u8, usize); BUCKETS] {
+        let mut buckets = [(ptr::null_mut(), 0); BUCKETS];
         let _lock = self.lock.lock();
         for (i, bucket) in self.buckets.iter().enumerate() {
-            *unsafe { buckets.get_unchecked_mut(i) } =
-                bucket.entries.swap(ptr::null_mut(), Ordering::Relaxed);
+            let e = unsafe { buckets.get_unchecked_mut(i) };
+            (*e).0 = bucket.entries.swap(ptr::null_mut(), Ordering::Release);
+            (*e).1 = Location::bucket_len(i);
         }
         buckets
     }
