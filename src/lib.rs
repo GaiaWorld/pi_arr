@@ -1,10 +1,10 @@
 #![feature(vec_into_raw_parts)]
 
 use std::marker::PhantomData;
-use std::mem::{forget, replace};
+use std::mem::{forget, replace, size_of, transmute};
 use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::Ordering;
-use std::{fmt, mem, ptr};
+use std::{fmt, ptr};
 
 use pi_null::Null;
 use pi_share::{ShareMutex, SharePtr};
@@ -20,7 +20,7 @@ const MAX_ENTRIES: usize = (u32::MAX as usize) - SKIP;
 /// - Create a [`Arr`] containing a given list of elements:
 ///
 /// ```
-/// let arr = arr![1, 2, 3];
+/// let arr = pi_arr::arr![1, 2, 3];
 /// assert_eq!(arr[0], 1);
 /// assert_eq!(arr[1], 2);
 /// assert_eq!(arr[2], 3);
@@ -29,7 +29,7 @@ const MAX_ENTRIES: usize = (u32::MAX as usize) - SKIP;
 /// - Create a [`Arr`] from a given element and size:
 ///
 /// ```
-/// let arr = arr![1; 3];
+/// let arr = pi_arr::arr![1; 3];
 /// assert_eq!(arr[0], 1);
 /// assert_eq!(arr[1], 1);
 /// assert_eq!(arr[2], 1);
@@ -73,7 +73,7 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// let arr: pi_arr::arr<i32> = pi_arr::arr::new();
+    /// let arr: pi_arr::Arr<i32> = pi_arr::Arr::new();
     /// ```
     #[inline]
     pub fn new() -> Arr<T> {
@@ -89,7 +89,7 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// let arr = pi_arr::arr::with_capacity(10);
+    /// let mut arr = pi_arr::Arr::with_capacity(10);
     ///
     /// for i in 0..32 {
     ///     // will not allocate
@@ -101,7 +101,7 @@ impl<T: Null> Arr<T> {
     /// ```
     pub fn with_capacity(capacity: usize) -> Arr<T> {
         Arr {
-            raw: RawArr::with_capacity(capacity, Self::initialize, mem::size_of::<T>()),
+            raw: RawArr::with_capacity(capacity, Self::initialize, size_of::<T>()),
             _k: PhantomData,
         }
     }
@@ -113,7 +113,7 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// let arr = pi_arr::arr::new();
+    /// let mut arr = pi_arr::Arr::new();
     /// assert_eq!(arr.len(), 0);
     /// arr.set(1, 1);
     /// arr.set(2, 2);
@@ -133,7 +133,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.get(33));
     /// ```
     pub fn get(&self, index: usize) -> Option<&T> {
-        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
+        unsafe { transmute(self.raw.get(index, size_of::<T>())) }
     }
 
     /// Returns a reference to an element, without doing bounds
@@ -157,7 +157,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        &*(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
+        transmute(self.raw.get_unchecked(index, size_of::<T>()))
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -170,7 +170,7 @@ impl<T: Null> Arr<T> {
     /// assert_eq!(None, arr.get_mut(33));
     /// ```
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        unsafe { mem::transmute(self.raw.get_mut(index, mem::size_of::<T>())) }
+        unsafe { transmute(self.raw.get_mut(index, size_of::<T>())) }
     }
 
     /// Returns a mutable reference to an element, without doing bounds
@@ -193,7 +193,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
-        &mut *(self.raw.get_unchecked_mut(index, mem::size_of::<T>()) as *mut T)
+        transmute(self.raw.get_unchecked_mut(index, size_of::<T>()))
     }
     /// Returns a mutable reference to the element at the given index.
     /// If the bucket corresponding to the index is not allocated,
@@ -202,27 +202,25 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
+    /// use pi_null::Null;
     /// let mut arr = pi_arr::arr![10, 40, 30];
-    /// let arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, *arr.get_alloc(1));
     /// assert_eq!(true, arr.get_alloc(3).is_null());
     /// ```
     pub fn get_alloc(&mut self, index: usize) -> &mut T {
-        unsafe {
-            &mut *(self
-                .raw
-                .get_alloc(index, Self::initialize, mem::size_of::<T>())
-                as *mut T)
-        }
+        unsafe { transmute(self.raw.get_alloc(index, Self::initialize, size_of::<T>())) }
     }
     /// set element at the given index.
     ///
     /// # Examples
     ///
     /// ```
+    /// use pi_null::Null;
     /// let mut arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, arr.set(1, 20));
+    /// assert_eq!(Some(&20), arr.get(1));
     /// assert_eq!(true, arr.set(33, 5).is_null());
+    /// assert_eq!(Some(&5), arr.get(33));
     /// ```
     pub fn set(&mut self, index: usize, value: T) -> T {
         replace(self.get_alloc(index), value)
@@ -234,14 +232,15 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
+    /// use pi_null::Null;
     /// let arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(10, *arr.load(0).unwrap());
-    /// assert_eq!(Some(&mut 40), arr.load_mut(1));
+    /// assert_eq!(Some(&mut 40), arr.load(1));
     /// assert_eq!(true, arr.load(3).unwrap().is_null());
     /// assert_eq!(None, arr.load(33));
     /// ```
     pub fn load(&self, index: usize) -> Option<&mut T> {
-        unsafe { mem::transmute(self.raw.get(index, mem::size_of::<T>())) }
+        unsafe { transmute(self.raw.get(index, size_of::<T>())) }
     }
 
     /// Returns a mutable reference to an element, without doing bounds
@@ -264,7 +263,7 @@ impl<T: Null> Arr<T> {
     /// }
     /// ```
     pub unsafe fn load_unchecked(&self, index: usize) -> &mut T {
-        &mut *(self.raw.get_unchecked(index, mem::size_of::<T>()) as *mut T)
+        transmute(self.raw.get_unchecked(index, size_of::<T>()))
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -273,17 +272,13 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
+    /// use pi_null::Null;
     /// let arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, *arr.load_alloc(1));
     /// assert_eq!(true, arr.load_alloc(3).is_null());
     /// ```
     pub fn load_alloc(&self, index: usize) -> &mut T {
-        unsafe {
-            &mut *(self
-                .raw
-                .load_alloc(index, Self::initialize, mem::size_of::<T>())
-                as *mut T)
-        }
+        unsafe { transmute(self.raw.load_alloc(index, Self::initialize, size_of::<T>())) }
     }
 
     /// insert an element at the given index.
@@ -306,11 +301,12 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// let arr = pi_arr::arr![1, 2];
+    /// use pi_null::Null;
+    /// let mut arr = pi_arr::arr![1, 2];
     /// arr.clear();
     /// arr.set(2, 3);
-    /// assert_eq!(arr[0], 0);
-    /// assert_eq!(arr[1], 0);
+    /// assert_eq!(arr[0], i32::null());
+    /// assert_eq!(arr[1], i32::null());
     /// assert_eq!(arr[2], 3);
     /// ```
     pub fn clear(&self) {
@@ -331,18 +327,33 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
+    /// use pi_null::Null;
     /// let arr = pi_arr::arr![1, 2, 4];
+    /// arr.insert(98, 98);
     /// let mut iterator = arr.iter();
-    ///
+    /// assert_eq!(iterator.size_hint().0, 160);
     /// let r = iterator.next().unwrap();
     /// assert_eq!((r.0, *r.1), (0, 1));
     /// let r = iterator.next().unwrap();
     /// assert_eq!((r.0, *r.1), (1, 2));
     /// let r = iterator.next().unwrap();
     /// assert_eq!((r.0, *r.1), (2, 4));
+    /// for i in 3..32 {
+    ///     let r = iterator.next().unwrap();
+    ///     assert_eq!((r.0, *r.1), (i, i32::null()));
+    /// }
+    /// for i in 96..98 {
+    ///     let r = iterator.next().unwrap();
+    ///     assert_eq!((r.0, *r.1), (i, i32::null()));
+    /// }
     /// let r = iterator.next().unwrap();
-    /// assert_eq!((r.0, r.1.is_null()), (3, true));
-    /// assert_eq!(iterator.size_hint().0, 32-4);
+    /// assert_eq!((r.0, *r.1), (98, 98));
+    /// for i in 99..224 {
+    ///     let r = iterator.next().unwrap();
+    ///     assert_eq!((r.0, *r.1), (i, i32::null()));
+    /// }
+    /// assert_eq!(iterator.next(), None);
+    /// assert_eq!(iterator.size_hint().0, 0);
     /// ```
     #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
@@ -367,7 +378,7 @@ impl<T: Null> Arr<T> {
     /// ```
     pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
         Iter {
-            raw: self.raw.slice(range, mem::size_of::<T>()),
+            raw: self.raw.slice(range, size_of::<T>()),
             _k: PhantomData,
         }
     }
@@ -394,13 +405,7 @@ pub struct Iter<'a, T: 'a + Null> {
 impl<'a, T: Null> Iterator for Iter<'a, T> {
     type Item = (usize, &'a mut T);
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(r) = self.raw.next() {
-            let r: (usize, &mut T) = unsafe { mem::transmute(r) };
-            if !r.1.is_null() {
-                return Some(r);
-            }
-        }
-        None
+        unsafe { transmute(self.raw.next()) }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.raw.size_hint()
@@ -620,10 +625,10 @@ impl RawArr {
         let location = Location::of(index);
         let bucket = self.buckets.get_unchecked_mut(location.bucket);
         // safety: `location.bucket` is always in bounds
-        let mut entries = *bucket.entries.get_mut();
+        let entries = bucket.entries.get_mut();
         // bucket is uninitialized
         if entries.is_null() {
-            entries = Bucket::alloc(location.bucket_len * type_size, init, type_size);
+            *entries = Bucket::alloc(location.bucket_len * type_size, init, type_size);
         }
         // safety: `location.entry` is always in bounds for it's bucket
         entries.add(location.entry * type_size)
@@ -651,7 +656,7 @@ impl RawArr {
         let _lock = self.lock.lock();
         for (i, bucket) in self.buckets.iter().enumerate() {
             let e = unsafe { buckets.get_unchecked_mut(i) };
-            (*e).0 = bucket.entries.swap(ptr::null_mut(), Ordering::Release);
+            (*e).0 = bucket.entries.swap(ptr::null_mut(), Ordering::Acquire);
             (*e).1 = Location::bucket_len(i);
         }
         buckets
@@ -742,10 +747,10 @@ impl Bucket {
         lock: &ShareMutex<()>,
     ) -> *mut u8 {
         let _lock = lock.lock();
-        let mut ptr = self.entries.load(Ordering::Acquire);
+        let mut ptr = self.entries.load(Ordering::Relaxed);
         if ptr.is_null() {
             ptr = Bucket::alloc(len, init, type_size);
-            self.entries.store(ptr, Ordering::Release);
+            self.entries.store(ptr, Ordering::Relaxed);
         }
         ptr
     }
@@ -766,7 +771,7 @@ impl<'a> RawIter<'a> {
     }
 }
 impl<'a> Iterator for RawIter<'a> {
-    type Item = (usize, *mut u8);
+    type Item = (usize, &'a mut u8);
     fn next(&mut self) -> Option<Self::Item> {
         if self.amount == 0 {
             return None;
@@ -774,7 +779,7 @@ impl<'a> Iterator for RawIter<'a> {
         // 用size来保护self.start.entry不越过self.end.entry
         self.amount -= 1;
         if self.start.entry < self.start.bucket_len {
-            let r = self.ptr;
+            let r = unsafe { transmute(self.ptr) };
             self.ptr = unsafe { self.ptr.add(self.type_size) };
             let index = self.start.entry;
             self.start.entry += 1;
@@ -786,7 +791,7 @@ impl<'a> Iterator for RawIter<'a> {
             self.ptr = self.arr.entries(self.start.bucket);
             if !self.ptr.is_null() {
                 self.start.entry += 1;
-                let r = self.ptr;
+                let r = unsafe { transmute(self.ptr) };
                 self.ptr = unsafe { self.ptr.add(self.type_size) };
                 return Some((self.bucket_index, r));
             }
@@ -796,7 +801,7 @@ impl<'a> Iterator for RawIter<'a> {
         None
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.amount))
+        (self.amount, Some(self.amount))
     }
 }
 
@@ -917,16 +922,29 @@ mod tests {
         assert_eq!(arr[2], 3);
 
         let arr = crate::arr![1, 2, 4];
-        arr.insert(1111, 1111);
+        arr.insert(98, 98);
         let mut iterator = arr.iter();
+        assert_eq!(iterator.size_hint().0, 160);
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (0, 1));
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (1, 2));
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (2, 4));
+        for i in 3..32 {
+            let r = iterator.next().unwrap();
+            assert_eq!((r.0, *r.1), (i, i32::null()));
+        }
+        for i in 96..98 {
+            let r = iterator.next().unwrap();
+            assert_eq!((r.0, *r.1), (i, i32::null()));
+        }
         let r = iterator.next().unwrap();
-        assert_eq!((r.0, *r.1), (1111, 1111));
+        assert_eq!((r.0, *r.1), (98, 98));
+        for i in 99..224 {
+            let r = iterator.next().unwrap();
+            assert_eq!((r.0, *r.1), (i, i32::null()));
+        }
         assert_eq!(iterator.next(), None);
         assert_eq!(iterator.size_hint().0, 0);
 
@@ -958,7 +976,7 @@ mod tests {
         }
 
         for i in 0..6 {
-            assert!(arr.iter().any(|(_, x)| x == &i));
+            assert!(arr.iter().any(|(_, x)| *x == i));
         }
     }
     #[test]
