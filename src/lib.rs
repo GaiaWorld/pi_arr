@@ -303,13 +303,13 @@ impl<T: Null> Arr<T> {
     /// ```
     /// use pi_null::Null;
     /// let mut arr = pi_arr::arr![1, 2];
-    /// arr.clear();
+    /// unsafe {arr.clear()};
     /// arr.set(2, 3);
     /// assert_eq!(arr[0], i32::null());
     /// assert_eq!(arr[1], i32::null());
     /// assert_eq!(arr[2], 3);
     /// ```
-    pub fn clear(&self) {
+    pub unsafe fn clear(&self) {
         for (entries, len) in self.raw.replace().into_iter() {
             if entries.is_null() {
                 continue;
