@@ -1,4 +1,5 @@
 #![feature(vec_into_raw_parts)]
+#![feature(const_option)]
 
 use std::marker::PhantomData;
 use std::mem::{forget, replace, size_of, transmute};
@@ -734,14 +735,14 @@ impl RawArr {
             ptr = unsafe { ptr.add(start.entry * type_size) };
         }
         RawIter {
-            arr: &self,
+            buckets: &self.buckets,
             type_size,
             start,
             end,
             ptr,
         }
     }
-    #[inline]
+    #[inline(always)]
     fn entries(&self, bucket: usize) -> *mut u8 {
         unsafe {
             self.buckets
@@ -750,19 +751,20 @@ impl RawArr {
                 .load(Ordering::Acquire)
         }
     }
-    #[inline]
+    #[inline(always)]
     fn entries_mut(&mut self, bucket: usize) -> *mut u8 {
         unsafe { *self.buckets.get_unchecked_mut(bucket).entries.get_mut() }
     }
 }
 
 #[derive(Default)]
-struct Bucket {
+pub struct Bucket {
     entries: SharePtr<u8>,
 }
 
 impl Bucket {
-    fn new(entries: *mut u8) -> Bucket {
+    #[inline(always)]
+    const fn new(entries: *mut u8) -> Bucket {
         Bucket {
             entries: SharePtr::new(entries),
         }
@@ -790,7 +792,7 @@ impl Bucket {
 }
 
 pub struct RawIter<'a> {
-    arr: &'a RawArr,
+    buckets: &'a [Bucket],
     type_size: usize,
     start: Location,
     end: Location,
@@ -798,12 +800,22 @@ pub struct RawIter<'a> {
 }
 impl<'a> RawIter<'a> {
     #[inline(always)]
+    pub fn empty() -> Self {
+        RawIter {
+            buckets: &[],
+            type_size: 0,
+            start: Location::default(),
+            end: Location::default(),
+            ptr: ptr::null_mut(),
+        }
+    }
+    #[inline(always)]
     pub fn type_size(&self) -> usize {
         self.type_size
     }
-    #[inline]
+    #[inline(always)]
     pub fn index(&self) -> usize {
-        self.start.bucket_index() + self.start.entry
+        self.start.bucket_index()
     }
     #[inline(always)]
     pub(crate) fn step(&mut self) -> &'a mut u8 {
@@ -826,7 +838,12 @@ impl<'a> Iterator for RawIter<'a> {
                 return None;
             }
             self.start.bucket += 1;
-            self.ptr = self.arr.entries(self.start.bucket);
+            self.ptr = unsafe {
+                self.buckets
+                    .get_unchecked(self.start.bucket)
+                    .entries
+                    .load(Ordering::Acquire)
+            };
             if !self.ptr.is_null() {
                 if self.start.bucket == self.end.bucket {
                     self.start.len = self.end.entry;
@@ -857,7 +874,7 @@ impl<'a> Iterator for RawIter<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Location {
     // the index of the bucket
     bucket: usize,
@@ -874,7 +891,7 @@ const SKIP_BUCKET: usize = ((usize::BITS - SKIP.leading_zeros()) as usize) - 1;
 
 impl Location {
     #[inline(always)]
-    fn of(index: usize) -> Location {
+    const fn of(index: usize) -> Location {
         let skipped = index.checked_add(SKIP).expect("exceeded maximum length");
         let bucket = usize::BITS - skipped.leading_zeros();
         let bucket = (bucket as usize) - (SKIP_BUCKET + 1);
@@ -887,13 +904,13 @@ impl Location {
             entry,
         }
     }
-    #[inline]
-    fn bucket_len(bucket: usize) -> usize {
+    #[inline(always)]
+    const fn bucket_len(bucket: usize) -> usize {
         1 << (bucket + SKIP_BUCKET)
     }
-    #[inline]
+    #[inline(always)]
     fn bucket_index(&self) -> usize {
-        ((u32::MAX as u64) >> (u32::BITS - self.bucket as u32) << SKIP_BUCKET) as usize
+        ((u32::MAX as u64) >> (u32::BITS - self.bucket as u32) << SKIP_BUCKET) as usize + self.entry
     }
 }
 
