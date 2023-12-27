@@ -8,10 +8,9 @@ extern crate test;
 
 use std::mem::{forget, replace, transmute, MaybeUninit};
 use std::ops::{Index, IndexMut, Range};
-use std::sync::atomic::Ordering;
 use std::ptr;
-
-use pi_share::{ShareMutex, SharePtr};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
 
 const BUCKETS: usize = (u32::BITS as usize) - SKIP_BUCKET;
 const MAX_ENTRIES: usize = (u32::MAX as usize) - SKIP;
@@ -69,7 +68,7 @@ macro_rules! arr {
 #[derive(Default)]
 pub struct Arr<T> {
     buckets: [Bucket<T>; BUCKETS],
-    lock: ShareMutex<()>,
+    lock: Mutex<()>,
 }
 
 unsafe impl<T: Send> Send for Arr<T> {}
@@ -113,7 +112,7 @@ impl<T> Arr<T> {
         if capacity == 0 {
             return Arr {
                 buckets: buckets.map(Bucket::new),
-                lock: ShareMutex::default(),
+                lock: Mutex::default(),
             };
         }
         let end = Location::of(capacity).bucket;
@@ -124,7 +123,7 @@ impl<T> Arr<T> {
 
         Arr {
             buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
+            lock: Mutex::default(),
         }
     }
 
@@ -472,11 +471,10 @@ impl<T: Copy> Clone for Arr<T> {
         }
         Arr {
             buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
+            lock: Mutex::default(),
         }
     }
 }
-
 
 /// An iterator over the elements of a [`Arr<T>`].
 ///
@@ -590,21 +588,21 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
 #[derive(Default)]
 struct Bucket<T> {
-    entries: SharePtr<MaybeUninit<T>>,
+    entries: AtomicPtr<MaybeUninit<T>>,
 }
 
 impl<T> Bucket<T> {
     #[inline(always)]
     const fn new(entries: *mut MaybeUninit<T>) -> Self {
         Bucket {
-            entries: SharePtr::new(entries),
+            entries: AtomicPtr::new(entries),
         }
     }
     fn alloc(len: usize) -> *mut MaybeUninit<T> {
         let entries = Vec::with_capacity(len);
         entries.into_raw_parts().0
     }
-    fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut MaybeUninit<T> {
+    fn init(&self, len: usize, lock: &Mutex<()>) -> *mut MaybeUninit<T> {
         let _lock = lock.lock();
         let mut ptr = self.entries.load(Ordering::Relaxed);
         if ptr.is_null() {
@@ -632,7 +630,7 @@ impl BlobArr {
         if capacity == 0 {
             return BlobArr(Arr {
                 buckets: buckets.map(Bucket::new),
-                lock: ShareMutex::default(),
+                lock: Mutex::default(),
             });
         }
         let end = Location::of(capacity).bucket;
@@ -643,7 +641,7 @@ impl BlobArr {
 
         BlobArr(Arr {
             buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
+            lock: Mutex::default(),
         })
     }
     #[inline(always)]
