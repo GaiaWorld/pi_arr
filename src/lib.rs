@@ -9,7 +9,7 @@ extern crate test;
 use std::mem::{forget, replace, transmute, MaybeUninit};
 use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::Ordering;
-use std::{fmt, ptr};
+use std::ptr;
 
 use pi_share::{ShareMutex, SharePtr};
 
@@ -327,32 +327,6 @@ impl<T> Arr<T> {
         unsafe { transmute(entries.add(location.entry)) }
     }
 
-    // /// clear all elements
-    // ///
-    // /// # Examples
-    // ///
-    // /// ```
-    // /// use pi_null::Null;
-    // /// let mut arr = pi_arr::arr![1, 2];
-    // /// unsafe {arr.clear()};
-    // /// arr.set(2, 3);
-    // /// assert_eq!(arr[0], i32::null());
-    // /// assert_eq!(arr[1], i32::null());
-    // /// assert_eq!(arr[2], 3);
-    // /// ```
-    // pub unsafe fn clear(&mut self) {
-    //     for (i, bucket) in self.buckets.iter().enumerate() {
-    //         let entries = bucket.entries.load(Ordering::Relaxed);
-    //         if entries.is_null() {
-    //             continue;
-    //         }
-    //         let len = Location::bucket_len(i);
-    //         // safety: in clear
-    //         let mut vec = unsafe { Vec::from_raw_parts(entries as *mut T, len, len) };
-    //         vec.clear();
-    //         forget(vec);
-    //     }
-    // }
     /// replace buckets.
     pub fn replace(&self) -> [Vec<MaybeUninit<T>>; BUCKETS] {
         let mut buckets = [0; BUCKETS].map(|_| Vec::new());
@@ -442,6 +416,67 @@ impl<T> Arr<T> {
         *self.buckets.get_unchecked_mut(bucket).entries.get_mut()
     }
 }
+
+impl<T> Index<usize> for Arr<T> {
+    type Output = MaybeUninit<T>;
+    #[inline(always)]
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(&Location::of(index))
+            .expect("no element found at index {index}")
+    }
+}
+impl<T> IndexMut<usize> for Arr<T> {
+    #[inline(always)]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.get_mut(&Location::of(index))
+            .expect("no element found at index_mut {index}")
+    }
+}
+
+impl<T> FromIterator<T> for Arr<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+
+        let (lower, _) = iter.size_hint();
+        let mut arr = Arr::with_capacity(lower);
+        for (i, value) in iter.enumerate() {
+            arr.alloc(&Location::of(i)).write(value);
+        }
+        arr
+    }
+}
+
+impl<T> Extend<T> for Arr<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let iter = iter.into_iter();
+        for (i, value) in iter.enumerate() {
+            self.alloc(&Location::of(i)).write(value);
+        }
+    }
+}
+
+impl<T: Copy> Clone for Arr<T> {
+    fn clone(&self) -> Arr<T> {
+        let mut buckets: [*mut MaybeUninit<T>; BUCKETS] = [ptr::null_mut(); BUCKETS];
+
+        for (i, bucket) in buckets.iter_mut().enumerate() {
+            let entries = unsafe { self.load_entries(i) };
+            // bucket is uninitialized
+            if entries.is_null() {
+                continue;
+            }
+            let len = Location::bucket_len(i);
+            let vec = unsafe { Vec::from_raw_parts(entries, len, len) };
+            *bucket = vec.clone().into_raw_parts().0;
+            forget(vec);
+        }
+        Arr {
+            buckets: buckets.map(Bucket::new),
+            lock: ShareMutex::default(),
+        }
+    }
+}
+
 
 /// An iterator over the elements of a [`Arr<T>`].
 ///
@@ -552,134 +587,6 @@ impl<'a, T> Iterator for Iter<'a, T> {
         self.size_hint()
     }
 }
-
-impl<T> Index<usize> for Arr<T> {
-    type Output = MaybeUninit<T>;
-    #[inline(always)]
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get(&Location::of(index))
-            .expect("no element found at index {index}")
-    }
-}
-impl<T> IndexMut<usize> for Arr<T> {
-    #[inline(always)]
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.get_mut(&Location::of(index))
-            .expect("no element found at index_mut {index}")
-    }
-}
-
-// impl<T> Drop for Arr<T> {
-//     fn drop(&mut self) {
-//         for (i, bucket) in self.buckets.iter_mut().enumerate() {
-//             let entries = *bucket.entries.get_mut() as *mut T;
-//             if entries.is_null() {
-//                 continue;
-//             }
-//             let len = Location::bucket_len(i);
-//             // safety: in drop
-//             unsafe { drop(Vec::from_raw_parts(entries, len, len)) }
-//         }
-//     }
-// }
-
-impl<T> FromIterator<T> for Arr<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let iter = iter.into_iter();
-
-        let (lower, _) = iter.size_hint();
-        let mut arr = Arr::with_capacity(lower);
-        for (i, value) in iter.enumerate() {
-            arr.alloc(&Location::of(i)).write(value);
-        }
-        arr
-    }
-}
-
-impl<T> Extend<T> for Arr<T> {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        let iter = iter.into_iter();
-        for (i, value) in iter.enumerate() {
-            self.alloc(&Location::of(i)).write(value);
-        }
-    }
-}
-
-impl<T: Copy> Clone for Arr<T> {
-    fn clone(&self) -> Arr<T> {
-        let mut buckets: [*mut MaybeUninit<T>; BUCKETS] = [ptr::null_mut(); BUCKETS];
-
-        for (i, bucket) in buckets.iter_mut().enumerate() {
-            let entries = unsafe { self.load_entries(i) };
-            // bucket is uninitialized
-            if entries.is_null() {
-                continue;
-            }
-            let len = Location::bucket_len(i);
-            let vec = unsafe { Vec::from_raw_parts(entries, len, len) };
-            *bucket = vec.clone().into_raw_parts().0;
-            forget(vec);
-        }
-        Arr {
-            buckets: buckets.map(Bucket::new),
-            lock: ShareMutex::default(),
-        }
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Arr<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.iter()).finish()
-    }
-}
-
-// impl<T: PartialEq> PartialEq for Arr<T> {
-//     fn eq(&self, other: &Self) -> bool {
-//         if self.len() != other.len() {
-//             return false;
-//         }
-//         let mut it = self.iter();
-//         let mut other = other.iter();
-//         while let Some(v) = it.next() {
-//             if let Some(v2) = other.next() {
-//                 if v != v2 {
-//                     return false;
-//                 }
-//             } else {
-//                 return false;
-//             }
-//         }
-//         true
-//     }
-// }
-
-// impl<A, T> PartialEq<A> for Arr<T>
-// where
-//     A: AsRef<[T]>,
-//     T: PartialEq,
-// {
-//     fn eq(&self, other: &A) -> bool {
-//         let other = other.as_ref();
-
-//         if self.len() != other.len() {
-//             return false;
-//         }
-//         let mut it = self.iter();
-//         let mut other = other.iter();
-//         while let Some(v) = it.next() {
-//             if let Some(v2) = other.next() {
-//                 if v != v2 {
-//                     return false;
-//                 }
-//             } else {
-//                 return false;
-//             }
-//         }
-//         true
-//     }
-// }
-
-// impl<T: Eq> Eq for Arr<T> {}
 
 #[derive(Default)]
 struct Bucket<T> {
