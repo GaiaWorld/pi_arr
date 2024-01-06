@@ -46,7 +46,7 @@ macro_rules! arr {
         $crate::Arr::new()
     };
     ($elem:expr; $n:expr) => {{
-        let mut arr = $crate::Arr::with_capacity($n, 1);
+        let mut arr = $crate::Arr::with_capacity($n);
         arr.extend(::core::iter::repeat($elem).take($n));
         arr
     }};
@@ -83,7 +83,7 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline]
     pub fn new() -> Arr<T> {
-        Arr::with_capacity(0, 1)
+        Arr::with_capacity(0)
     }
 
     /// Constructs a new, empty `Arr<T>` with the specified capacity.
@@ -106,7 +106,11 @@ impl<T: Null> Arr<T> {
     /// arr.set(33, 33);
     /// ```
     #[inline(always)]
-    pub fn with_capacity(capacity: usize, multiple: usize) -> Arr<T> {
+    pub fn with_capacity(capacity: usize) -> Arr<T> {
+        Self::with_capacity_multiple(capacity, 1)
+    }
+    #[inline(always)]
+    pub fn with_capacity_multiple(capacity: usize, multiple: usize) -> Arr<T> {
         let mut buckets = [ptr::null_mut(); BUCKETS];
         if capacity == 0 {
             return Arr {
@@ -492,7 +496,7 @@ impl<T: Null> FromIterator<T> for Arr<T> {
         let iter = iter.into_iter();
 
         let (lower, _) = iter.size_hint();
-        let mut arr = Arr::with_capacity(lower, 1);
+        let mut arr = Arr::with_capacity(lower);
         for (i, value) in iter.enumerate() {
             *arr.alloc(i) = value;
         }
@@ -716,14 +720,6 @@ impl Location {
     #[inline(always)]
     const fn bucket_len(bucket: usize) -> usize {
         1 << (bucket + SKIP_BUCKET)
-    }
-    #[inline(always)]
-    pub fn bucket(&self) -> usize {
-        self.bucket
-    }
-    #[inline(always)]
-    pub fn entry(&self) -> usize {
-        self.entry
     }
     #[inline(always)]
     pub fn index(&self) -> usize {
@@ -957,7 +953,7 @@ mod tests {
     fn bench_loc(b: &mut Bencher) {
         b.iter(move || {
             for i in 0..1000 {
-                unsafe { AAA += Location::of(i).entry() as u64 };
+                unsafe { AAA += Location::of(i).entry as u64 };
             }
         });
     }
