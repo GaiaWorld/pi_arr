@@ -236,13 +236,13 @@ impl<T: Null> Arr<T> {
     /// ```
     /// use pi_null::Null;
     /// let mut arr = pi_arr::arr![10, 40, 30];
-    /// assert_eq!(40, *arr.alloc(1));
-    /// assert_eq!(true, arr.alloc(3).is_null());
+    /// assert_eq!(40, *arr.alloc(1, 1));
+    /// assert_eq!(true, arr.alloc(3, 1).is_null());
     /// ```
     #[inline(always)]
-    pub fn alloc(&mut self, index: usize) -> &mut T {
+    pub fn alloc(&mut self, index: usize, multiple: usize) -> &mut T {
         let location = &Location::of(index);
-        let entries = self.alloc_bucket(location, 1);
+        let entries = self.alloc_bucket(location, multiple);
         // safety: `location.entry` is always in bounds for it's bucket
         unsafe { &mut *entries.add(location.entry) }
     }
@@ -260,7 +260,7 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline(always)]
     pub fn set(&mut self, index: usize, value: T) -> T {
-        replace(self.alloc(index), value)
+        replace(self.alloc(index, 1), value)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -324,13 +324,13 @@ impl<T: Null> Arr<T> {
     /// ```
     /// use pi_null::Null;
     /// let arr = pi_arr::arr![10, 40, 30];
-    /// assert_eq!(40, *arr.load_alloc(1));
-    /// assert_eq!(true, arr.load_alloc(3).is_null());
+    /// assert_eq!(40, *arr.load_alloc(1, 1));
+    /// assert_eq!(true, arr.load_alloc(3,1).is_null());
     /// ```
     #[inline(always)]
-    pub fn load_alloc(&self, index: usize) -> &mut T {
+    pub fn load_alloc(&self, index: usize, multiple: usize) -> &mut T {
         let location = &Location::of(index);
-        let entries = self.load_alloc_bucket(location, 1);
+        let entries = self.load_alloc_bucket(location, multiple);
         // safety: `location.entry` is always in bounds for it's bucket
         unsafe { transmute(entries.add(location.entry)) }
     }
@@ -347,7 +347,7 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline(always)]
     pub fn insert(&self, index: usize, value: T) -> T {
-        replace(self.load_alloc(index), value)
+        replace(self.load_alloc(index, 1), value)
     }
 
     /// replace buckets.
@@ -548,7 +548,7 @@ impl<T: Null> FromIterator<T> for Arr<T> {
         let (lower, _) = iter.size_hint();
         let mut arr = Arr::with_capacity(lower);
         for (i, value) in iter.enumerate() {
-            *arr.alloc(i) = value;
+            arr.set(i, value);
         }
         arr
     }
@@ -558,7 +558,7 @@ impl<T: Null> Extend<T> for Arr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
-            *self.alloc(i) = value;
+            self.set(i, value);
         }
     }
 }
@@ -919,8 +919,8 @@ mod tests {
         assert_eq!(arr[2], 1);
 
         let mut arr = arr![10, 40, 30];
-        assert_eq!(40, *arr.alloc(1));
-        assert_eq!(true, arr.alloc(3).is_null());
+        assert_eq!(40, *arr.alloc(1, 1));
+        assert_eq!(true, arr.alloc(3, 1).is_null());
         assert_eq!(40, arr.set(1, 20));
         assert_eq!(true, arr.set(33, 5).is_null());
 
@@ -945,9 +945,9 @@ mod tests {
         }
 
         let arr = arr![10, 40, 30];
-        assert_eq!(40, *arr.load_alloc(1));
-        assert_eq!(true, arr.load_alloc(3).is_null());
-        assert_eq!(true, arr.load_alloc(133).is_null());
+        assert_eq!(40, *arr.load_alloc(1, 1));
+        assert_eq!(true, arr.load_alloc(3, 1).is_null());
+        assert_eq!(true, arr.load_alloc(133, 1).is_null());
 
         let arr = arr![10, 40, 30];
         assert_eq!(40, *arr.load(1).unwrap());
@@ -1101,7 +1101,7 @@ mod tests {
     fn bench_arr(b: &mut Bencher) {
         let mut arr = Arr::new();
         for i in 0..2000 {
-            *arr.alloc(i) = 0;
+            *arr.alloc(i, 1) = 0;
         }
         b.iter(move || {
             for i in arr.slice(100..200) {
