@@ -66,7 +66,7 @@ macro_rules! arr {
 /// store it behind an [`Arc`](std::sync::Arc) or similar.
 #[derive(Default)]
 pub struct Arr<T> {
-    buckets: [Bucket<T>; BUCKETS],
+    buckets: [SharePtr<T>; BUCKETS],
     lock: ShareMutex<()>,
 }
 
@@ -114,18 +114,18 @@ impl<T: Null> Arr<T> {
         let mut buckets = [ptr::null_mut(); BUCKETS];
         if capacity == 0 {
             return Arr {
-                buckets: buckets.map(Bucket::new),
+                buckets: buckets.map(SharePtr::new),
                 lock: ShareMutex::default(),
             };
         }
         let end = Location::of(capacity).bucket;
         for (i, bucket) in buckets[..=end].iter_mut().enumerate() {
             let len = Location::bucket_len(i);
-            *bucket = Bucket::alloc(len * multiple);
+            *bucket = bucket_alloc(len * multiple);
         }
 
         Arr {
-            buckets: buckets.map(Bucket::new),
+            buckets: buckets.map(SharePtr::new),
             lock: ShareMutex::default(),
         }
     }
@@ -355,7 +355,7 @@ impl<T: Null> Arr<T> {
         let mut buckets = [0; BUCKETS].map(|_| Vec::new());
         for (i, bucket) in self.buckets.iter().enumerate() {
             *unsafe { buckets.get_unchecked_mut(i) } =
-                bucket.to_vec(Location::bucket_len(i) * multiple);
+                bucket_to_vec(bucket, Location::bucket_len(i) * multiple);
         }
         buckets
     }
@@ -474,27 +474,24 @@ impl<T: Null> Arr<T> {
     }
     #[inline(always)]
     pub unsafe fn load_entries(&self, bucket: usize) -> *mut T {
-        self.buckets
-            .get_unchecked(bucket)
-            .entries
-            .load(Ordering::Relaxed)
+        self.buckets.get_unchecked(bucket).load(Ordering::Relaxed)
     }
     #[inline(always)]
     pub unsafe fn entries(&self, bucket: usize) -> *mut T {
-        *self.buckets.get_unchecked(bucket).entries.as_ptr()
+        *self.buckets.get_unchecked(bucket).as_ptr()
     }
     #[inline(always)]
     pub unsafe fn entries_mut(&mut self, bucket: usize) -> *mut T {
-        *self.buckets.get_unchecked_mut(bucket).entries.get_mut()
+        *self.buckets.get_unchecked_mut(bucket).get_mut()
     }
     #[inline(always)]
     pub fn load_alloc_bucket(&self, location: &Location, multiple: usize) -> *mut T {
         let bucket = unsafe { self.buckets.get_unchecked(location.bucket) };
         // safety: `location.bucket` is always in bounds
-        let mut entries = bucket.entries.load(Ordering::Relaxed);
+        let mut entries = bucket.load(Ordering::Relaxed);
         // bucket is uninitialized
         if entries.is_null() {
-            entries = bucket.init(location.len * multiple, &self.lock)
+            entries = bucket_init(bucket, location.len * multiple, &self.lock)
         }
         entries
     }
@@ -502,14 +499,17 @@ impl<T: Null> Arr<T> {
     pub fn alloc_bucket(&mut self, location: &Location, multiple: usize) -> *mut T {
         let bucket = unsafe { self.buckets.get_unchecked_mut(location.bucket) };
         // safety: `location.bucket` is always in bounds
-        let mut entries = *bucket.entries.get_mut();
+        let mut entries = *bucket.get_mut();
 
         // bucket is uninitialized
         if entries.is_null() {
-            entries = bucket.init(location.len * multiple, &self.lock);
+            entries = bucket_init(bucket, location.len * multiple, &self.lock);
         }
-
         entries
+    }
+    #[inline(always)]
+    pub fn buckets(&self) -> &[SharePtr<T>] {
+        &self.buckets
     }
 }
 
@@ -530,7 +530,7 @@ impl<T: Null> IndexMut<usize> for Arr<T> {
 impl<T> Drop for Arr<T> {
     fn drop(&mut self) {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
-            let entries = *bucket.entries.get_mut();
+            let entries = *bucket.get_mut();
             if entries.is_null() {
                 continue;
             }
@@ -579,7 +579,7 @@ impl<T: Null + Clone> Clone for Arr<T> {
             forget(vec);
         }
         Arr {
-            buckets: buckets.map(Bucket::new),
+            buckets: buckets.map(SharePtr::new),
             lock: ShareMutex::default(),
         }
     }
@@ -590,7 +590,7 @@ impl<T: Null + Clone> Clone for Arr<T> {
 /// See [`Arr::iter`] for details.
 
 pub struct Iter<'a, T> {
-    buckets: &'a [Bucket<T>],
+    buckets: &'a [SharePtr<T>],
     start: Location,
     end: Location,
     ptr: *mut T,
@@ -606,15 +606,10 @@ impl<'a, T> Iter<'a, T> {
         }
     }
     #[inline(always)]
-    fn new(buckets: &'a [Bucket<T>], range: Range<usize>) -> Self {
+    fn new(buckets: &'a [SharePtr<T>], range: Range<usize>) -> Self {
         let mut start = Location::of(range.start);
         let end = Location::of(range.end);
-        let ptr = unsafe {
-            buckets
-                .get_unchecked(start.bucket)
-                .entries
-                .load(Ordering::Relaxed)
-        };
+        let ptr = unsafe { buckets.get_unchecked(start.bucket).load(Ordering::Relaxed) };
         if ptr.is_null() || start.bucket > end.bucket {
             start.len = start.entry;
         } else if start.bucket == end.bucket {
@@ -647,7 +642,6 @@ impl<'a, T> Iter<'a, T> {
                 transmute(
                     self.buckets
                         .get_unchecked(self.start.bucket)
-                        .entries
                         .load(Ordering::Relaxed),
                 )
             };
@@ -677,7 +671,6 @@ impl<'a, T> Iter<'a, T> {
                 transmute(
                     self.buckets
                         .get_unchecked(self.end.bucket)
-                        .entries
                         .load(Ordering::Relaxed),
                 )
             };
@@ -731,15 +724,10 @@ impl<'a, T> ReverseIter<'a, T> {
     pub fn index(&self) -> usize {
         self.0.end.index()
     }
-    fn new(buckets: &'a [Bucket<T>], range: Range<usize>) -> Self {
+    fn new(buckets: &'a [SharePtr<T>], range: Range<usize>) -> Self {
         let start = Location::of(range.start);
         let mut end = Location::of(range.end);
-        let ptr = unsafe {
-            buckets
-                .get_unchecked(end.bucket)
-                .entries
-                .load(Ordering::Relaxed)
-        };
+        let ptr = unsafe { buckets.get_unchecked(end.bucket).load(Ordering::Relaxed) };
         if ptr.is_null() || start.bucket > end.bucket {
             end.len = end.entry;
         } else if start.bucket == end.bucket {
@@ -776,36 +764,23 @@ impl<'a, T> Iterator for ReverseIter<'a, T> {
     }
 }
 
-#[derive(Default)]
-struct Bucket<T> {
-    entries: SharePtr<T>,
+fn bucket_alloc<T: Null>(len: usize) -> *mut T {
+    let mut entries: Vec<T> = Vec::with_capacity(len);
+    entries.resize_with(entries.capacity(), || T::null());
+    entries.into_raw_parts().0
 }
-
-impl<T: Null> Bucket<T> {
-    #[inline(always)]
-    const fn new(entries: *mut T) -> Self {
-        Bucket {
-            entries: SharePtr::new(entries),
-        }
+fn bucket_init<T: Null>(share_ptr: &SharePtr<T>, len: usize, lock: &ShareMutex<()>) -> *mut T {
+    let _lock = lock.lock();
+    let mut ptr = share_ptr.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        ptr = bucket_alloc(len);
+        share_ptr.store(ptr, Ordering::Relaxed);
     }
-    fn alloc(len: usize) -> *mut T {
-        let mut entries: Vec<T> = Vec::with_capacity(len);
-        entries.resize_with(entries.capacity(), || T::null());
-        entries.into_raw_parts().0
-    }
-    fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut T {
-        let _lock = lock.lock();
-        let mut ptr = self.entries.load(Ordering::Relaxed);
-        if ptr.is_null() {
-            ptr = Bucket::alloc(len);
-            self.entries.store(ptr, Ordering::Relaxed);
-        }
-        ptr
-    }
-    fn to_vec(&self, len: usize) -> Vec<T> {
-        let ptr = self.entries.swap(ptr::null_mut(), Ordering::Relaxed);
-        unsafe { Vec::from_raw_parts(ptr, len, len) }
-    }
+    ptr
+}
+fn bucket_to_vec<T>(ptr: &SharePtr<T>, len: usize) -> Vec<T> {
+    let ptr = ptr.swap(ptr::null_mut(), Ordering::Relaxed);
+    unsafe { Vec::from_raw_parts(ptr, len, len) }
 }
 
 #[derive(Debug, Default, Clone)]
