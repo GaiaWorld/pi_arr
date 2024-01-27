@@ -10,10 +10,10 @@ extern crate test;
 use std::mem::{forget, replace, transmute};
 use std::ops::{Index, IndexMut, Range};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 use pi_null::Null;
+use pi_share::{ShareMutex, SharePtr};
 
 pub const BUCKETS: usize = (u32::BITS as usize) - SKIP_BUCKET;
 const MAX_ENTRIES: usize = (u32::MAX as usize) - SKIP;
@@ -67,7 +67,7 @@ macro_rules! arr {
 #[derive(Default)]
 pub struct Arr<T> {
     buckets: [Bucket<T>; BUCKETS],
-    lock: Mutex<()>,
+    lock: ShareMutex<()>,
 }
 
 unsafe impl<T: Send> Send for Arr<T> {}
@@ -115,7 +115,7 @@ impl<T: Null> Arr<T> {
         if capacity == 0 {
             return Arr {
                 buckets: buckets.map(Bucket::new),
-                lock: Mutex::default(),
+                lock: ShareMutex::default(),
             };
         }
         let end = Location::of(capacity).bucket;
@@ -126,7 +126,7 @@ impl<T: Null> Arr<T> {
 
         Arr {
             buckets: buckets.map(Bucket::new),
-            lock: Mutex::default(),
+            lock: ShareMutex::default(),
         }
     }
 
@@ -362,7 +362,7 @@ impl<T: Null> Arr<T> {
 
     /// Returns an iterator over the array.
     ///
-    /// Values are yielded in the form `(index, value)`. The array may
+    /// Values are yielded in the form `Entry`. The array may
     /// have in-progress concurrent writes that create gaps, so `index`
     /// may not be strictly sequential.
     ///
@@ -404,7 +404,7 @@ impl<T: Null> Arr<T> {
 
     /// Returns an iterator over the array at the given range.
     ///
-    /// Values are yielded in the form `(index, Entry)`.
+    /// Values are yielded in the form `Entry`.
     ///
     /// # Examples
     ///
@@ -421,6 +421,56 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
         Iter::new(&self.buckets, range)
+    }
+    /// Returns an reverse iterator over the array at the given range.
+    ///
+    /// Values are yielded in the form `Entry`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_null::Null;
+    /// let arr = pi_arr::arr![1, 2, 4, 6];
+    /// let mut iterator = arr.reverse_iter();
+    ///
+    /// for i in 4..32 {
+    ///     let r = iterator.next().unwrap();
+    ///     assert_eq!(32 - i + 3, iterator.index());
+    ///     assert_eq!(*r, u32::null());
+    /// }
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 6);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 4);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 2);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 1);
+    /// assert_eq!(iterator.next(), None);
+    /// ```
+    #[inline]
+    pub fn reverse_iter(&self) -> ReverseIter<'_, T> {
+        self.reverse_slice(0..MAX_ENTRIES)
+    }
+    /// Returns an iterator over the array at the given range.
+    ///
+    /// Values are yielded in the form `Entry`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let arr = pi_arr::arr![1, 2, 4, 6];
+    /// let mut iterator = arr.reverse_slice(1..3);
+    ///
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 4);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 2);
+    /// assert_eq!(iterator.next(), None);
+    /// ```
+    #[inline(always)]
+    pub fn reverse_slice(&self, range: Range<usize>) -> ReverseIter<'_, T> {
+        ReverseIter::new(&self.buckets, range)
     }
     #[inline(always)]
     pub unsafe fn load_entries(&self, bucket: usize) -> *mut T {
@@ -530,7 +580,7 @@ impl<T: Null + Clone> Clone for Arr<T> {
         }
         Arr {
             buckets: buckets.map(Bucket::new),
-            lock: Mutex::default(),
+            lock: ShareMutex::default(),
         }
     }
 }
@@ -559,20 +609,18 @@ impl<'a, T> Iter<'a, T> {
     fn new(buckets: &'a [Bucket<T>], range: Range<usize>) -> Self {
         let mut start = Location::of(range.start);
         let end = Location::of(range.end);
-        if start.bucket == end.bucket {
-            start.len = end.entry;
-        } else if start.bucket > end.bucket {
-            start.len = 0;
-        }
         let ptr = unsafe {
             buckets
                 .get_unchecked(start.bucket)
                 .entries
                 .load(Ordering::Relaxed)
         };
-        if ptr.is_null() {
+        if ptr.is_null() || start.bucket > end.bucket {
             start.len = start.entry;
+        } else if start.bucket == end.bucket {
+            start.len = end.entry;
         }
+
         Iter {
             buckets,
             start,
@@ -614,11 +662,38 @@ impl<'a, T> Iter<'a, T> {
             }
         }
     }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.start.bucket == self.end.bucket {
-            let n = self.start.len.saturating_sub(self.start.entry);
-            return (n, Some(n));
-        } else if self.start.bucket > self.end.bucket {
+    #[inline(always)]
+    pub(crate) fn get_last(&mut self) -> &'a mut T {
+        unsafe { transmute(self.ptr.add(self.end.entry)) }
+    }
+    #[inline]
+    pub(crate) fn prev_bucket(&mut self) -> Option<&'a mut T> {
+        loop {
+            if self.start.bucket >= self.end.bucket {
+                return None;
+            }
+            self.end.bucket -= 1;
+            self.ptr = unsafe {
+                transmute(
+                    self.buckets
+                        .get_unchecked(self.end.bucket)
+                        .entries
+                        .load(Ordering::Relaxed),
+                )
+            };
+            if !self.ptr.is_null() {
+                self.end.entry = Location::bucket_len(self.end.bucket) - 1;
+                if self.start.bucket == self.end.bucket {
+                    self.end.len = self.start.entry;
+                } else {
+                    self.end.len = 0;
+                }
+                return Some(self.get_last());
+            }
+        }
+    }
+    fn size(&self) -> (usize, Option<usize>) {
+        if self.start.bucket > self.end.bucket {
             return (0, Some(0));
         }
         // 最小为起始槽的entry数量
@@ -642,20 +717,75 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
     #[inline(always)]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.size_hint()
+        if self.start.bucket == self.end.bucket {
+            let n = self.start.len.saturating_sub(self.start.entry);
+            return (n, Some(n));
+        }
+        self.size()
+    }
+}
+
+pub struct ReverseIter<'a, T>(Iter<'a, T>);
+impl<'a, T> ReverseIter<'a, T> {
+    #[inline(always)]
+    pub fn index(&self) -> usize {
+        self.0.end.index()
+    }
+    fn new(buckets: &'a [Bucket<T>], range: Range<usize>) -> Self {
+        let start = Location::of(range.start);
+        let mut end = Location::of(range.end);
+        let ptr = unsafe {
+            buckets
+                .get_unchecked(end.bucket)
+                .entries
+                .load(Ordering::Relaxed)
+        };
+        if ptr.is_null() || start.bucket > end.bucket {
+            end.len = end.entry;
+        } else if start.bucket == end.bucket {
+            end.len = start.entry;
+        } else {
+            end.len = 0;
+        }
+        ReverseIter(Iter {
+            buckets,
+            start,
+            end,
+            ptr,
+        })
+    }
+}
+impl<'a, T> Iterator for ReverseIter<'a, T> {
+    type Item = &'a mut T;
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.end.entry > self.0.end.len {
+            self.0.end.entry -= 1;
+            let r = self.0.get_last();
+            return Some(r);
+        }
+        self.0.prev_bucket()
+    }
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.0.start.bucket == self.0.end.bucket {
+            let n = self.0.end.entry.saturating_sub(self.0.end.len);
+            return (n, Some(n));
+        }
+        self.0.size()
     }
 }
 
 #[derive(Default)]
 struct Bucket<T> {
-    entries: AtomicPtr<T>,
+    entries: SharePtr<T>,
 }
 
 impl<T: Null> Bucket<T> {
     #[inline(always)]
     const fn new(entries: *mut T) -> Self {
         Bucket {
-            entries: AtomicPtr::new(entries),
+            entries: SharePtr::new(entries),
         }
     }
     fn alloc(len: usize) -> *mut T {
@@ -663,7 +793,7 @@ impl<T: Null> Bucket<T> {
         Self::initialize(entries.as_mut_ptr(), len);
         entries.into_raw_parts().0
     }
-    fn init(&self, len: usize, lock: &Mutex<()>) -> *mut T {
+    fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut T {
         let _lock = lock.lock();
         let mut ptr = self.entries.load(Ordering::Relaxed);
         if ptr.is_null() {
@@ -747,7 +877,7 @@ mod tests {
         let arr = arr![1, 2, 4];
         arr.insert(98, 98);
         let mut iterator = arr.iter();
-        assert_eq!(iterator.size_hint().0, 32);
+        assert_eq!(iterator.size().0, 32);
         let r = iterator.next().unwrap();
         assert_eq!((iterator.index() - 1, *r), (0, 1));
         let r = iterator.next().unwrap();
@@ -769,7 +899,26 @@ mod tests {
             assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
         }
         assert_eq!(iterator.next(), None);
-        assert_eq!(iterator.size_hint().0, 0);
+        assert_eq!(iterator.size().0, 0);
+    }
+    #[test]
+    fn test3() {
+        let arr = arr![1, 2, 4, 6];
+        let mut iterator = arr.reverse_iter();
+        for i in 4..32 {
+            let r = iterator.next().unwrap();
+            assert_eq!(32 - i + 3, iterator.index());
+            assert_eq!(*r, i32::null());
+        }
+        let r = iterator.next().unwrap();
+        assert_eq!(*r, 6);
+        let r = iterator.next().unwrap();
+        assert_eq!(*r, 4);
+        let r = iterator.next().unwrap();
+        assert_eq!(*r, 2);
+        let r = iterator.next().unwrap();
+        assert_eq!(*r, 1);
+        assert_eq!(iterator.next(), None);
     }
     #[test]
     fn test() {
