@@ -790,7 +790,7 @@ impl<T: Null> Bucket<T> {
     }
     fn alloc(len: usize) -> *mut T {
         let mut entries: Vec<T> = Vec::with_capacity(len);
-        Self::initialize(entries.as_mut_ptr(), len);
+        entries.resize_with(entries.capacity(), || T::null());
         entries.into_raw_parts().0
     }
     fn init(&self, len: usize, lock: &ShareMutex<()>) -> *mut T {
@@ -805,15 +805,6 @@ impl<T: Null> Bucket<T> {
     fn to_vec(&self, len: usize) -> Vec<T> {
         let ptr = self.entries.swap(ptr::null_mut(), Ordering::Relaxed);
         unsafe { Vec::from_raw_parts(ptr, len, len) }
-    }
-    #[inline(always)]
-    fn initialize(mut ptr: *mut T, len: usize) {
-        for _ in 0..len {
-            unsafe {
-                std::ptr::write(ptr, T::null());
-                ptr = ptr.add(1);
-            }
-        }
     }
 }
 
