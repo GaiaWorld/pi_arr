@@ -849,12 +849,8 @@ impl Location {
         1 << (bucket + SKIP_BUCKET)
     }
     #[inline(always)]
-    pub fn index(&self) -> isize {
-        if self.bucket < 0 {
-            return -(self.len as isize - self.entry as isize);
-        }
-        ((u32::MAX as u64) >> (u32::BITS - self.bucket as u32) << SKIP_BUCKET) as isize
-            + self.entry as isize
+    pub const fn index(bucket: u32, entry: usize) -> usize {
+        ((i32::MAX as u32) >> (u32::BITS - 1 - bucket) << SKIP_BUCKET) as usize + entry
     }
 }
 
@@ -880,24 +876,66 @@ mod tests {
         let mut iterator = arr.iter();
         assert_eq!(iterator.size().0, 32);
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.start().index() - 1, *r), (0, 1));
+        assert_eq!(
+            (
+                Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                *r
+            ),
+            (0, 1)
+        );
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.start().index() - 1, *r), (1, 2));
+        assert_eq!(
+            (
+                Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                *r
+            ),
+            (1, 2)
+        );
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.start().index() - 1, *r), (2, 4));
+        assert_eq!(
+            (
+                Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                *r
+            ),
+            (2, 4)
+        );
         for i in 3..32 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
+            assert_eq!(
+                (
+                    Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                    *r
+                ),
+                (i, i32::null())
+            );
         }
         for i in 96..98 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
+            assert_eq!(
+                (
+                    Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                    *r
+                ),
+                (i, i32::null())
+            );
         }
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.start().index() - 1, *r), (98, 98));
+        assert_eq!(
+            (
+                Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                *r
+            ),
+            (98, 98)
+        );
         for i in 99..224 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
+            assert_eq!(
+                (
+                    Location::index(iterator.start().bucket as u32, iterator.start().entry - 1),
+                    *r
+                ),
+                (i, i32::null())
+            );
         }
         assert_eq!(iterator.next(), None);
         assert_eq!(iterator.size().0, 0);
@@ -908,7 +946,10 @@ mod tests {
         let mut iterator = arr.reverse_iter();
         for i in 4..32 {
             let r = iterator.next().unwrap();
-            assert_eq!(32 - i + 3, iterator.end().index());
+            assert_eq!(
+                32 - i + 3,
+                Location::index(iterator.end().bucket as u32, iterator.end().entry)
+            );
             assert_eq!(*r, i32::null());
         }
         let r = iterator.next().unwrap();
@@ -1073,7 +1114,7 @@ mod tests {
             assert_eq!(loc.len, 32);
             assert_eq!(loc.bucket, 0);
             assert_eq!(loc.entry, i);
-            assert_eq!(loc.index() as usize, i)
+            assert_eq!(Location::index(loc.bucket as u32, loc.entry), i)
         }
 
         assert_eq!(Location::bucket_len(1), 64);
@@ -1082,7 +1123,7 @@ mod tests {
             assert_eq!(loc.len, 64);
             assert_eq!(loc.bucket, 1);
             assert_eq!(loc.entry, i - 32);
-            assert_eq!(loc.index() as usize, i)
+            assert_eq!(Location::index(loc.bucket as u32, loc.entry), i)
         }
 
         assert_eq!(Location::bucket_len(2), 128);
@@ -1091,7 +1132,7 @@ mod tests {
             assert_eq!(loc.len, 128);
             assert_eq!(loc.bucket, 2);
             assert_eq!(loc.entry, i - 96);
-            assert_eq!(loc.index() as usize, i)
+            assert_eq!(Location::index(loc.bucket as u32, loc.entry), i)
         }
 
         let max = Location::of(MAX_ENTRIES);
