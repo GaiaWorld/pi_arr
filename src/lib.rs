@@ -118,7 +118,7 @@ impl<T: Null> Arr<T> {
                 lock: ShareMutex::default(),
             };
         }
-        let end = Location::of(capacity).bucket;
+        let end = Location::of(capacity).bucket as usize;
         for (i, bucket) in buckets[..=end].iter_mut().enumerate() {
             let len = Location::bucket_len(i);
             *bucket = bucket_alloc(len * multiple);
@@ -143,7 +143,7 @@ impl<T: Null> Arr<T> {
     pub fn get(&self, index: usize) -> Option<&T> {
         let location = &Location::of(index);
         // safety: `location.bucket` is always in bounds
-        let entries = unsafe { self.entries(location.bucket) };
+        let entries = unsafe { self.entries(location.bucket as usize) };
 
         // bucket is uninitialized
         if entries.is_null() {
@@ -177,7 +177,7 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         let location = &Location::of(index);
-        &*self.entries(location.bucket).add(location.entry)
+        &*self.entries(location.bucket as usize).add(location.entry)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -192,7 +192,7 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         let location = &Location::of(index);
-        let entries = unsafe { self.entries(location.bucket) };
+        let entries = unsafe { self.entries(location.bucket as usize) };
 
         // bucket is uninitialized
         if entries.is_null() {
@@ -225,7 +225,7 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         let location = &Location::of(index);
-        &mut *self.entries(location.bucket).add(location.entry)
+        &mut *self.entries(location.bucket as usize).add(location.entry)
     }
     /// Returns a mutable reference to the element at the given index.
     /// If the bucket corresponding to the index is not allocated,
@@ -280,7 +280,7 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub fn load(&self, index: usize) -> Option<&mut T> {
         let location = &Location::of(index);
-        let entries = unsafe { self.load_entries(location.bucket) };
+        let entries = unsafe { self.load_entries(location.bucket as usize) };
 
         // bucket is uninitialized
         if entries.is_null() {
@@ -313,7 +313,9 @@ impl<T: Null> Arr<T> {
     #[inline(always)]
     pub unsafe fn load_unchecked(&self, index: usize) -> &mut T {
         let location = &Location::of(index);
-        &mut *self.load_entries(location.bucket).add(location.entry)
+        &mut *self
+            .load_entries(location.bucket as usize)
+            .add(location.entry)
     }
 
     /// Returns a mutable reference to the element at the given index.
@@ -420,7 +422,7 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline(always)]
     pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
-        Iter::new(&self.buckets, range)
+        Iter::new(&self.buckets, range).init_iter()
     }
     /// Returns an reverse iterator over the array at the given range.
     ///
@@ -470,8 +472,18 @@ impl<T: Null> Arr<T> {
     /// ```
     #[inline(always)]
     pub fn reverse_slice(&self, range: Range<usize>) -> ReverseIter<'_, T> {
-        ReverseIter::new(&self.buckets, range)
+        Iter::new(&self.buckets, range).init_reverse()
     }
+    #[inline(always)]
+    pub fn iter_with_ptr(&self, ptr: *mut T, start: Location, end: Location) -> Iter<'_, T> {
+        Iter {
+            buckets: &self.buckets,
+            start,
+            end,
+            ptr,
+        }
+    }
+
     #[inline(always)]
     pub unsafe fn load_entries(&self, bucket: usize) -> *mut T {
         self.buckets.get_unchecked(bucket).load(Ordering::Relaxed)
@@ -486,7 +498,7 @@ impl<T: Null> Arr<T> {
     }
     #[inline(always)]
     pub fn load_alloc_bucket(&self, location: &Location, multiple: usize) -> *mut T {
-        let bucket = unsafe { self.buckets.get_unchecked(location.bucket) };
+        let bucket = unsafe { self.buckets.get_unchecked(location.bucket as usize) };
         // safety: `location.bucket` is always in bounds
         let mut entries = bucket.load(Ordering::Relaxed);
         // bucket is uninitialized
@@ -497,7 +509,7 @@ impl<T: Null> Arr<T> {
     }
     #[inline(always)]
     pub fn alloc_bucket(&mut self, location: &Location, multiple: usize) -> *mut T {
-        let bucket = unsafe { self.buckets.get_unchecked_mut(location.bucket) };
+        let bucket = unsafe { self.buckets.get_unchecked_mut(location.bucket as usize) };
         // safety: `location.bucket` is always in bounds
         let mut entries = *bucket.get_mut();
 
@@ -607,25 +619,54 @@ impl<'a, T> Iter<'a, T> {
     }
     #[inline(always)]
     fn new(buckets: &'a [SharePtr<T>], range: Range<usize>) -> Self {
-        let mut start = Location::of(range.start);
+        let start = Location::of(range.start);
         let end = Location::of(range.end);
-        let ptr = unsafe { buckets.get_unchecked(start.bucket).load(Ordering::Relaxed) };
-        if ptr.is_null() || start.bucket > end.bucket {
-            start.len = start.entry;
-        } else if start.bucket == end.bucket {
-            start.len = end.entry;
-        }
-
         Iter {
             buckets,
             start,
             end,
-            ptr,
+            ptr: ptr::null_mut(),
         }
     }
     #[inline(always)]
-    pub fn index(&self) -> usize {
-        self.start.index()
+    fn init_iter(mut self) -> Self {
+        let ptr = unsafe {
+            self.buckets
+                .get_unchecked(self.start.bucket as usize)
+                .load(Ordering::Relaxed)
+        };
+        if ptr.is_null() || self.start.bucket > self.end.bucket {
+            self.start.len = self.start.entry;
+        } else if self.start.bucket == self.end.bucket {
+            self.start.len = self.end.entry;
+        }
+        self.ptr = ptr;
+        self
+    }
+    #[inline(always)]
+    fn init_reverse(mut self) -> ReverseIter<'a, T> {
+        let ptr = unsafe {
+            self.buckets
+                .get_unchecked(self.end.bucket as usize)
+                .load(Ordering::Relaxed)
+        };
+        if ptr.is_null() || self.start.bucket > self.end.bucket {
+            self.end.len = self.end.entry;
+        } else if self.start.bucket == self.end.bucket {
+            self.end.len = self.start.entry;
+        } else {
+            self.end.len = 0;
+        }
+        self.ptr = ptr;
+        ReverseIter(self)
+    }
+    #[inline(always)]
+    pub fn start(&self) -> &Location {
+        &self.start
+    }
+    #[inline(always)]
+    pub fn end(&self) -> &Location {
+        &self.end
     }
     #[inline(always)]
     pub(crate) fn get(&mut self) -> &'a mut T {
@@ -641,7 +682,7 @@ impl<'a, T> Iter<'a, T> {
             self.ptr = unsafe {
                 transmute(
                     self.buckets
-                        .get_unchecked(self.start.bucket)
+                        .get_unchecked(self.start.bucket as usize)
                         .load(Ordering::Relaxed),
                 )
             };
@@ -649,7 +690,7 @@ impl<'a, T> Iter<'a, T> {
                 if self.start.bucket == self.end.bucket {
                     self.start.len = self.end.entry;
                 } else {
-                    self.start.len = Location::bucket_len(self.start.bucket);
+                    self.start.len = Location::bucket_len(self.start.bucket as usize);
                 }
                 self.start.entry = 1;
                 return Some(unsafe { transmute(self.ptr) });
@@ -670,12 +711,12 @@ impl<'a, T> Iter<'a, T> {
             self.ptr = unsafe {
                 transmute(
                     self.buckets
-                        .get_unchecked(self.end.bucket)
+                        .get_unchecked(self.end.bucket as usize)
                         .load(Ordering::Relaxed),
                 )
             };
             if !self.ptr.is_null() {
-                self.end.entry = Location::bucket_len(self.end.bucket) - 1;
+                self.end.entry = Location::bucket_len(self.end.bucket as usize) - 1;
                 if self.start.bucket == self.end.bucket {
                     self.end.len = self.start.entry;
                 } else {
@@ -721,26 +762,8 @@ impl<'a, T> Iterator for Iter<'a, T> {
 pub struct ReverseIter<'a, T>(Iter<'a, T>);
 impl<'a, T> ReverseIter<'a, T> {
     #[inline(always)]
-    pub fn index(&self) -> usize {
-        self.0.end.index()
-    }
-    fn new(buckets: &'a [SharePtr<T>], range: Range<usize>) -> Self {
-        let start = Location::of(range.start);
-        let mut end = Location::of(range.end);
-        let ptr = unsafe { buckets.get_unchecked(end.bucket).load(Ordering::Relaxed) };
-        if ptr.is_null() || start.bucket > end.bucket {
-            end.len = end.entry;
-        } else if start.bucket == end.bucket {
-            end.len = start.entry;
-        } else {
-            end.len = 0;
-        }
-        ReverseIter(Iter {
-            buckets,
-            start,
-            end,
-            ptr,
-        })
+    pub fn end(&self) -> &Location {
+        self.0.end()
     }
 }
 impl<'a, T> Iterator for ReverseIter<'a, T> {
@@ -783,22 +806,30 @@ fn bucket_to_vec<T>(ptr: &SharePtr<T>, len: usize) -> Vec<T> {
     unsafe { Vec::from_raw_parts(ptr, len, len) }
 }
 
+// skip the shorter buckets to avoid unnecessary allocations.
+// this also reduces the maximum capacity of a arr.
+const SKIP: usize = 32;
+const SKIP_BUCKET: usize = ((usize::BITS - SKIP.leading_zeros()) as usize) - 1;
+
 #[derive(Debug, Default, Clone)]
 pub struct Location {
     // the index of the bucket
-    pub bucket: usize,
+    pub bucket: isize,
     // the length
     pub len: usize,
     // the index of the entry in `bucket`
     pub entry: usize,
 }
 
-// skip the shorter buckets to avoid unnecessary allocations.
-// this also reduces the maximum capacity of a arr.
-const SKIP: usize = 32;
-const SKIP_BUCKET: usize = ((usize::BITS - SKIP.leading_zeros()) as usize) - 1;
-
 impl Location {
+    #[inline(always)]
+    pub const fn new(bucket: isize, bucket_len: usize, entry: usize) -> Self {
+        Location {
+            bucket,
+            len: bucket_len,
+            entry,
+        }
+    }
     #[inline(always)]
     pub const fn of(index: usize) -> Location {
         let skipped = index.checked_add(SKIP).expect("exceeded maximum length");
@@ -808,7 +839,7 @@ impl Location {
         let entry = skipped ^ bucket_len;
 
         Location {
-            bucket,
+            bucket: bucket as isize,
             len: bucket_len,
             entry,
         }
@@ -818,8 +849,12 @@ impl Location {
         1 << (bucket + SKIP_BUCKET)
     }
     #[inline(always)]
-    pub fn index(&self) -> usize {
-        ((u32::MAX as u64) >> (u32::BITS - self.bucket as u32) << SKIP_BUCKET) as usize + self.entry
+    pub fn index(&self) -> isize {
+        if self.bucket < 0 {
+            return -(self.len as isize - self.entry as isize);
+        }
+        ((u32::MAX as u64) >> (u32::BITS - self.bucket as u32) << SKIP_BUCKET) as isize
+            + self.entry as isize
     }
 }
 
@@ -845,24 +880,24 @@ mod tests {
         let mut iterator = arr.iter();
         assert_eq!(iterator.size().0, 32);
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.index() - 1, *r), (0, 1));
+        assert_eq!((iterator.start().index() - 1, *r), (0, 1));
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.index() - 1, *r), (1, 2));
+        assert_eq!((iterator.start().index() - 1, *r), (1, 2));
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.index() - 1, *r), (2, 4));
+        assert_eq!((iterator.start().index() - 1, *r), (2, 4));
         for i in 3..32 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
         }
         for i in 96..98 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
         }
         let r = iterator.next().unwrap();
-        assert_eq!((iterator.index() - 1, *r), (98, 98));
+        assert_eq!((iterator.start().index() - 1, *r), (98, 98));
         for i in 99..224 {
             let r = iterator.next().unwrap();
-            assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+            assert_eq!((iterator.start().index() - 1, *r), (i, i32::null()));
         }
         assert_eq!(iterator.next(), None);
         assert_eq!(iterator.size().0, 0);
@@ -873,7 +908,7 @@ mod tests {
         let mut iterator = arr.reverse_iter();
         for i in 4..32 {
             let r = iterator.next().unwrap();
-            assert_eq!(32 - i + 3, iterator.index());
+            assert_eq!(32 - i + 3, iterator.end().index());
             assert_eq!(*r, i32::null());
         }
         let r = iterator.next().unwrap();
@@ -1038,7 +1073,7 @@ mod tests {
             assert_eq!(loc.len, 32);
             assert_eq!(loc.bucket, 0);
             assert_eq!(loc.entry, i);
-            assert_eq!(loc.index(), i)
+            assert_eq!(loc.index() as usize, i)
         }
 
         assert_eq!(Location::bucket_len(1), 64);
@@ -1047,7 +1082,7 @@ mod tests {
             assert_eq!(loc.len, 64);
             assert_eq!(loc.bucket, 1);
             assert_eq!(loc.entry, i - 32);
-            assert_eq!(loc.index(), i)
+            assert_eq!(loc.index() as usize, i)
         }
 
         assert_eq!(Location::bucket_len(2), 128);
@@ -1056,11 +1091,11 @@ mod tests {
             assert_eq!(loc.len, 128);
             assert_eq!(loc.bucket, 2);
             assert_eq!(loc.entry, i - 96);
-            assert_eq!(loc.index(), i)
+            assert_eq!(loc.index() as usize, i)
         }
 
         let max = Location::of(MAX_ENTRIES);
-        assert_eq!(max.bucket, BUCKETS - 1);
+        assert_eq!(max.bucket as usize, BUCKETS - 1);
         assert_eq!(max.len, 1 << 31);
         assert_eq!(max.entry, (1 << 31) - 1);
     }
