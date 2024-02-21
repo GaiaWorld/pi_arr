@@ -803,6 +803,9 @@ fn bucket_init<T: Null>(share_ptr: &SharePtr<T>, len: usize, lock: &ShareMutex<(
 }
 fn bucket_to_vec<T>(ptr: &SharePtr<T>, len: usize) -> Vec<T> {
     let ptr = ptr.swap(ptr::null_mut(), Ordering::Relaxed);
+    if ptr.is_null() {
+        return Vec::new()
+    }
     unsafe { Vec::from_raw_parts(ptr, len, len) }
 }
 
