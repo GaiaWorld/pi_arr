@@ -833,7 +833,7 @@ impl Location {
         }
     }
     #[inline(always)]
-    const fn bucket_len(bucket: usize) -> usize {
+    pub const fn bucket_len(bucket: usize) -> usize {
         1 << (bucket + SKIP_BUCKET)
     }
     #[inline(always)]
