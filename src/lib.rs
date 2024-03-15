@@ -346,9 +346,9 @@ impl<T: Null> Arr<T> {
 
     /// replace buckets.
     pub fn replace(&self) -> [*mut T; BUCKETS] {
-        let buckets = [0; BUCKETS].map(|_| ptr::null_mut());
-        for bucket in self.buckets.iter() {
-            bucket.swap(ptr::null_mut(), Ordering::Relaxed);
+        let mut buckets = [0; BUCKETS].map(|_| ptr::null_mut());
+        for (i, p) in self.buckets.iter().enumerate() {
+            buckets[i] = p.swap(ptr::null_mut(), Ordering::Relaxed);
         }
         buckets
     }
