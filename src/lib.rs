@@ -594,25 +594,26 @@ impl<T: Null + Clone> Clone for Arr<T> {
 /// See [`Arr::iter`] for details.
 
 pub struct Iter<'a, T> {
-    buckets: &'a [SharePtr<T>],
+    ptr: *mut T,
     start: Location,
     end: Location,
-    ptr: *mut T,
+    buckets: &'a [SharePtr<T>; BUCKETS],
 }
 impl<'a, T> Iter<'a, T> {
     #[inline(always)]
     pub fn empty() -> Self {
         Iter {
-            buckets: &[],
+            buckets: unsafe { transmute(ptr::null::<[SharePtr<T>; BUCKETS]>()) },
             start: Location::default(),
             end: Location::default(),
             ptr: ptr::null_mut(),
         }
     }
     #[inline(always)]
-    fn new(buckets: &'a [SharePtr<T>], range: Range<usize>) -> Self {
+    fn new(buckets: &'a [SharePtr<T>; BUCKETS], range: Range<usize>) -> Self {
         let start = Location::of(range.start);
-        let end = Location::of(range.end);
+        let mut end = Location::of(range.end.saturating_sub(1));
+        end.entry += 1;
         Iter {
             buckets,
             start,
@@ -801,21 +802,21 @@ const SKIP_BUCKET: usize = ((usize::BITS - SKIP.leading_zeros()) as usize) - 1;
 
 #[derive(Debug, Default, Clone)]
 pub struct Location {
-    // the index of the bucket
-    pub bucket: isize,
     // the length
     pub len: usize,
     // the index of the entry in `bucket`
     pub entry: usize,
+    // the index of the bucket
+    pub bucket: isize,
 }
 
 impl Location {
     #[inline(always)]
     pub const fn new(bucket: isize, bucket_len: usize, entry: usize) -> Self {
         Location {
-            bucket,
             len: bucket_len,
             entry,
+            bucket,
         }
     }
     #[inline(always)]
@@ -827,9 +828,9 @@ impl Location {
         let entry = skipped ^ bucket_len;
 
         Location {
-            bucket: bucket as isize,
             len: bucket_len,
             entry,
+            bucket: bucket as isize,
         }
     }
     #[inline(always)]
@@ -1096,7 +1097,14 @@ mod tests {
     }
     #[test]
     fn location() {
+        assert_eq!(Location::of(31).bucket, 0);
+        assert_eq!(Location::of(31).entry, 31);
+        assert_eq!(Location::of(31).len, 32);
+        assert_eq!(Location::of(32).bucket, 1);
+        assert_eq!(Location::of(32).entry, 0);
+        assert_eq!(Location::of(32).len, 64);
         assert_eq!(Location::bucket_len(0), 32);
+        assert_eq!(0usize.saturating_sub(0), 0);
         for i in 0..32 {
             let loc = Location::of(i);
             assert_eq!(loc.len, 32);
