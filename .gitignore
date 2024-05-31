@@ -3,3 +3,4 @@
 **/*.rs.bk
 /.cargo
 /Cargo.lock
+/.vscode/tasks.json
