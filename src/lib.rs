@@ -12,7 +12,6 @@ use std::ops::{Index, IndexMut, Range};
 use std::ptr::{null, null_mut, NonNull};
 use std::sync::atomic::Ordering;
 
-use pi_null::Null;
 use pi_share::{ShareMutex, SharePtr};
 
 /// Creates a [`Arr`] containing the given elements.
@@ -83,7 +82,7 @@ impl<T> Default for Arr<T> {
 unsafe impl<T: Send> Send for Arr<T> {}
 unsafe impl<T: Sync> Sync for Arr<T> {}
 
-impl<T: Null> Arr<T> {
+impl<T: Default> Arr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
     /// # Examples
@@ -250,11 +249,11 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::pi_arr;
     /// let mut arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, *arr.alloc(1));
-    /// assert_eq!(true, arr.alloc(3).is_null());
+    /// assert_eq!(0, *arr.alloc(3));
     /// ```
     #[inline(always)]
     pub fn alloc(&mut self, index: usize) -> &mut T {
@@ -269,12 +268,12 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::pi_arr;
     /// let mut arr = crate::pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, arr.set(1, 20));
     /// assert_eq!(Some(&20), arr.get(1));
-    /// assert_eq!(true, arr.set(33, 5).is_null());
+    /// assert_eq!(0, arr.set(33, 5));
     /// assert_eq!(Some(&5), arr.get(33));
     /// ```
     #[inline(always)]
@@ -289,7 +288,7 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::pi_arr;
     /// let arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(10, *arr.load(0).unwrap());
@@ -340,11 +339,11 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::pi_arr;
     /// let arr = pi_arr::arr![10, 40, 30];
     /// assert_eq!(40, *arr.load_alloc(1));
-    /// assert_eq!(true, arr.load_alloc(3).is_null());
+    /// assert_eq!(0, *arr.load_alloc(3));
     /// ```
     #[inline(always)]
     pub fn load_alloc(&self, index: usize) -> &mut T {
@@ -379,7 +378,7 @@ impl<T: Null> Arr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::pi_arr;
     /// let arr = pi_arr::arr![1, 2, 4];
     /// let mut iterator = arr.slice(0..pi_arr::MAX_ENTRIES);
@@ -491,7 +490,7 @@ impl<T: Null> Arr<T> {
         }
         assert_eq!(c1, vec.capacity());
         // 如果容量比len大，则初始化为null元素
-        vec.resize_with(vec.capacity(), || T::null());
+        vec.resize_with(vec.capacity(), || T::default());
         self.capacity = vec.capacity() / multiple;
         self.ptr = vec.into_raw_parts().0;
     }
@@ -513,7 +512,7 @@ impl<T: Null> Arr<T> {
         additional = (len + additional).saturating_sub(self.capacity);
         if additional > 0 {
             vec.reserve(additional * multiple);
-            vec.resize_with(vec.capacity(), || T::null());
+            vec.resize_with(vec.capacity(), || T::default());
             self.capacity = vec.capacity() / multiple;
         }
         self.ptr = vec.into_raw_parts().0;
@@ -527,14 +526,14 @@ impl<T: Null> Arr<T> {
     }
 }
 
-impl<T: Null> Index<usize> for Arr<T> {
+impl<T: Default> Index<usize> for Arr<T> {
     type Output = T;
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("no element found at index {index}")
     }
 }
-impl<T: Null> IndexMut<usize> for Arr<T> {
+impl<T: Default> IndexMut<usize> for Arr<T> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index)
@@ -551,7 +550,7 @@ impl<T> Drop for Arr<T> {
     }
 }
 
-impl<T: Null> FromIterator<T> for Arr<T> {
+impl<T: Default> FromIterator<T> for Arr<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
 
@@ -564,7 +563,7 @@ impl<T: Null> FromIterator<T> for Arr<T> {
     }
 }
 
-impl<T: Null> Extend<T> for Arr<T> {
+impl<T: Default> Extend<T> for Arr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
@@ -573,7 +572,7 @@ impl<T: Null> Extend<T> for Arr<T> {
     }
 }
 
-impl<T: Null + Clone> Clone for Arr<T> {
+impl<T: Default + Clone> Clone for Arr<T> {
     fn clone(&self) -> Arr<T> {
         if size_of::<T>() == 0 {
             return Arr::default();
@@ -656,7 +655,7 @@ impl<T> Default for BucketArr<T> {
 unsafe impl<T: Send> Send for BucketArr<T> {}
 unsafe impl<T: Sync> Sync for BucketArr<T> {}
 
-impl<T: Null> BucketArr<T> {
+impl<T: Default> BucketArr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
     /// # Examples
@@ -819,11 +818,11 @@ impl<T: Null> BucketArr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::{pi_arr, pi_arr::Location};
     /// let mut arr = pi_arr::barr![10, 40, 30];
     /// assert_eq!(40, *arr.alloc(&Location::of(1)));
-    /// assert_eq!(true, arr.alloc(&Location::of(3)).is_null());
+    /// assert_eq!(0, *arr.alloc(&Location::of(3)));
     /// ```
     #[inline(always)]
     pub fn alloc(&mut self, location: &Location) -> &mut T {
@@ -836,12 +835,12 @@ impl<T: Null> BucketArr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::{pi_arr, pi_arr::Location};
     /// let mut arr = crate::pi_arr::barr![10, 40, 30];
     /// assert_eq!(40, arr.set(&Location::of(1), 20));
     /// assert_eq!(Some(&20), arr.get(&Location::of(1)));
-    /// assert_eq!(true, arr.set(&Location::of(33), 5).is_null());
+    /// assert_eq!(0, arr.set(&Location::of(33), 5));
     /// assert_eq!(Some(&5), arr.get(&Location::of(33)));
     /// ```
     #[inline(always)]
@@ -856,12 +855,12 @@ impl<T: Null> BucketArr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::{pi_arr, pi_arr::Location};
     /// let arr = pi_arr::barr![10, 40, 30];
     /// assert_eq!(10, *arr.load(&Location::of(0)).unwrap());
     /// assert_eq!(Some(&mut 40), arr.load(&Location::of(1)));
-    /// assert_eq!(true, arr.load(&Location::of(3)).unwrap().is_null());
+    /// assert_eq!(0, *arr.load(&Location::of(3)).unwrap());
     /// assert_eq!(None, arr.load(&Location::of(33)));
     /// ```
     #[inline(always)]
@@ -910,11 +909,11 @@ impl<T: Null> BucketArr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::{pi_arr, pi_arr::Location};
     /// let arr = pi_arr::barr![10, 40, 30];
     /// assert_eq!(40, *arr.load_alloc(&Location::of(1)));
-    /// assert_eq!(true, arr.load_alloc(&Location::of(3)).is_null());
+    /// assert_eq!(0, *arr.load_alloc(&Location::of(3)));
     /// ```
     #[inline(always)]
     pub fn load_alloc(&self, location: &Location) -> &mut T {
@@ -961,7 +960,7 @@ impl<T: Null> BucketArr<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_null::Null;
+    ///
     /// use crate::{pi_arr, pi_arr::Location};
     /// let arr = pi_arr::barr![1, 2, 4];
     /// arr.insert(&Location::of(98), 98);
@@ -975,17 +974,17 @@ impl<T: Null> BucketArr<T> {
     /// assert_eq!((iterator.index() - 1, *r), (2, 4));
     /// for i in 3..32 {
     ///     let r = iterator.next().unwrap();
-    ///     assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+    ///     assert_eq!((iterator.index() - 1, *r), (i, 0));
     /// }
     /// for i in 96..98 {
     ///     let r = iterator.next().unwrap();
-    ///     assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+    ///     assert_eq!((iterator.index() - 1, *r), (i, 0));
     /// }
     /// let r = iterator.next().unwrap();
     /// assert_eq!((iterator.index() - 1, *r), (98, 98));
     /// for i in 99..224 {
     ///     let r = iterator.next().unwrap();
-    ///     assert_eq!((iterator.index() - 1, *r), (i, i32::null()));
+    ///     assert_eq!((iterator.index() - 1, *r), (i, 0));
     /// }
     /// assert_eq!(iterator.next(), None);
     /// assert_eq!(iterator.size_hint().0, 0);
@@ -1069,7 +1068,7 @@ impl<T: Null> BucketArr<T> {
     }
 }
 
-impl<T: Null> Index<usize> for BucketArr<T> {
+impl<T: Default> Index<usize> for BucketArr<T> {
     type Output = T;
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
@@ -1077,7 +1076,7 @@ impl<T: Null> Index<usize> for BucketArr<T> {
             .expect("no element found at index {index}")
     }
 }
-impl<T: Null> IndexMut<usize> for BucketArr<T> {
+impl<T: Default> IndexMut<usize> for BucketArr<T> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(&Location::of(index))
@@ -1097,7 +1096,7 @@ impl<T> Drop for BucketArr<T> {
     }
 }
 
-impl<T: Null> FromIterator<T> for BucketArr<T> {
+impl<T: Default> FromIterator<T> for BucketArr<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
 
@@ -1110,7 +1109,7 @@ impl<T: Null> FromIterator<T> for BucketArr<T> {
     }
 }
 
-impl<T: Null> Extend<T> for BucketArr<T> {
+impl<T: Default> Extend<T> for BucketArr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
@@ -1119,7 +1118,7 @@ impl<T: Null> Extend<T> for BucketArr<T> {
     }
 }
 
-impl<T: Null + Clone> Clone for BucketArr<T> {
+impl<T: Default + Clone> Clone for BucketArr<T> {
     fn clone(&self) -> BucketArr<T> {
         let mut buckets: [*mut T; BUCKETS] = [null_mut(); BUCKETS];
 
@@ -1308,12 +1307,12 @@ pub fn to_bucket_vec<T>(ptr: *mut T, bucket: usize) -> Vec<T> {
     unsafe { Vec::from_raw_parts(ptr, len, len) }
 }
 
-fn bucket_alloc<T: Null>(len: usize) -> *mut T {
+fn bucket_alloc<T: Default>(len: usize) -> *mut T {
     let mut entries: Vec<T> = Vec::with_capacity(len);
-    entries.resize_with(entries.capacity(), || T::null());
+    entries.resize_with(entries.capacity(), || T::default());
     entries.into_raw_parts().0
 }
-fn bucket_init<T: Null>(share_ptr: &SharePtr<T>, len: usize, lock: &ShareMutex<()>) -> *mut T {
+fn bucket_init<T: Default>(share_ptr: &SharePtr<T>, len: usize, lock: &ShareMutex<()>) -> *mut T {
     let _lock = lock.lock();
     let mut ptr = share_ptr.load(Ordering::Relaxed);
     if ptr.is_null() {
@@ -1386,16 +1385,8 @@ mod tests {
     use crate::*;
     static mut AAA: u64 = 0;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct A();
-    impl Null for A {
-        fn null() -> Self {
-            A()
-        }
-        fn is_null(&self) -> bool {
-            true
-        }
-    }
 
     #[test]
     fn test1() {
@@ -1482,9 +1473,9 @@ mod tests {
 
         let mut arr = arr![10, 40, 30];
         assert_eq!(40, *arr.alloc(1));
-        assert_eq!(true, arr.alloc(3).is_null());
+        assert_eq!(0, *arr.alloc(3));
         assert_eq!(40, arr.set(1, 20));
-        assert_eq!(true, arr.set(33, 33).is_null());
+        assert_eq!(0, arr.set(33, 33));
 
         {
             let arr: Arr<i8> = arr![10, 40, 30];
@@ -1508,8 +1499,8 @@ mod tests {
 
         let arr = arr![10, 40, 30];
         assert_eq!(40, *arr.load_alloc(1));
-        assert_eq!(true, arr.load_alloc(3).is_null());
-        assert_eq!(true, arr.load_alloc(133).is_null());
+        assert_eq!(0, *arr.load_alloc(3));
+        assert_eq!(0, *arr.load_alloc(133));
 
         let arr = arr![10, 40, 30];
         assert_eq!(40, *arr.load(1).unwrap());
@@ -1534,17 +1525,17 @@ mod tests {
         assert_eq!((r.0, *r.1), (2, 4));
         for i in 3..32 {
             let r = iterator.next().unwrap();
-            assert_eq!((r.0, *r.1), (i, i32::null()));
+            assert_eq!((r.0, *r.1), (i, 0));
         }
         for i in 32..65 {
             let r = iterator.next().unwrap();
-            assert_eq!((r.0, *r.1), (i, i32::null()));
+            assert_eq!((r.0, *r.1), (i, 0));
         }
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (65, 97));
         for i in 66..67 {
             let r = iterator.next().unwrap();
-            assert_eq!((r.0, *r.1), (i, i32::null()));
+            assert_eq!((r.0, *r.1), (i, 0));
         }
         assert_eq!(iterator.next(), None);
         assert_eq!(iterator.size_hint().0, 0);

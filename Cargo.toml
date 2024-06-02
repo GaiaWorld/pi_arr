@@ -1,6 +1,6 @@
 [package]
 name = "pi_arr"
-version = "0.19.0"
+version = "0.19.1"
 authors = ["zmax <zmax@gaia.world>"]
 edition = "2021"
 description = "lock-free & auto-expansion array"
@@ -9,7 +9,6 @@ license = "MIT OR Apache-2.0"
 keywords = ["pi", "array", "pi_arr"]
 
 [dependencies]
-pi_null = "0.1"
 pi_share = "0.4"
 
 
