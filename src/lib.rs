@@ -132,6 +132,12 @@ impl<T: Default> Arr<T> {
             buckets,
         };
     }
+
+    #[inline(always)]
+    pub unsafe fn set_vec_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity;
+    }
+
     #[inline(always)]
     pub fn vec_capacity(&self) -> usize {
         if size_of::<T>() == 0 {
