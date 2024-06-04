@@ -427,13 +427,13 @@ impl<T: Default> Arr<T> {
         }
     }
     #[inline]
-    pub unsafe fn get_multiple(&self, index: usize, multiple: usize) -> &mut T {
+    pub fn get_multiple(&self, index: usize, multiple: usize) -> Option<&mut T> {
         if index < self.vec_capacity() {
-            return unsafe { &mut *self.ptr.add(index * multiple) };
+            return Some(unsafe { &mut *self.ptr.add(index * multiple) });
         }
         let mut loc = Location::of(index - self.capacity);
         loc.entry *= multiple;
-        self.buckets().load_unchecked(&loc)
+        self.buckets().load(&loc)
     }
     #[inline]
     pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
