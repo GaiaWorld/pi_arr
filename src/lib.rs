@@ -454,7 +454,7 @@ impl<T: Default> Arr<T> {
 
     /// 整理内存，将bucket_arr的数据移到vec上，并尝试将当前vec_capacity容量扩容len+additional
     pub fn settle(&mut self, mut len: usize, additional: usize, multiple: usize) {
-        if size_of::<T>() == 0 {
+        if size_of::<T>() == 0 || multiple == 0 {
             return;
         }
         let mut vec = to_vec(self.ptr, self.capacity * multiple);
@@ -475,23 +475,39 @@ impl<T: Default> Arr<T> {
         if multiple > 1 {
             arr = Self::reset_vec(arr, multiple);
         }
+        let mut it = arr.into_iter().enumerate();
         if self.capacity == 0 {
-            // 如果原vec为empty，则直接将arr的0位vec换上
-            len = len.saturating_sub(arr[0].len());
-            loc_len = loc_len.saturating_sub(arr[0].len());
-            let _ = replace(&mut vec, take(&mut arr[0]));
+            // 如果原vec为empty，则直接将arr的第一个vec换上
+            let (_, v) = it.next().unwrap();
+            if v.len() > 0 {
+                len = len.saturating_sub(v.len());
+                loc_len = loc_len.saturating_sub(v.len());
+                let _ = replace(&mut vec, v);
+                vec.reserve(loc_len);
+            } else {
+                vec.reserve(loc_len);
+                let vlen = SKIP * multiple;
+                len = len.saturating_sub(vlen);
+                vec.resize_with(vlen, || T::default());
+            }
+        } else {
+            // 将vec扩容
+            vec.reserve(loc_len);
         }
-        // 扩容vec
-        // 将vec扩容
-        vec.reserve(loc_len);
         let c1 = vec.capacity();
         // println!("settle1: {:?}", (c1, loc_len, len));
         // 将arr的数据移到vec上
-        for mut v in arr.into_iter() {
-            len = len.saturating_sub(v.len());
-            vec.append(&mut v);
+        for (i, mut v) in it {
             if len == 0 {
                 break;
+            }
+            if v.len() > 0 {
+                len = len.saturating_sub(v.len());
+                vec.append(&mut v);
+            } else {
+                let vlen = Location::bucket_len(i) * multiple;
+                len = len.saturating_sub(vlen);
+                vec.resize_with(vec.len() + vlen, || T::default());
             }
         }
         assert_eq!(c1, vec.capacity());
@@ -504,7 +520,7 @@ impl<T: Default> Arr<T> {
     /// 释放前，必须先调用clear方法，保证释放其中的数据
     #[inline(always)]
     pub fn clear(&mut self, len: usize, additional: usize, multiple: usize) {
-        if size_of::<T>() == 0 {
+        if size_of::<T>() == 0 || multiple == 0 {
             return;
         }
         if len > self.capacity {
