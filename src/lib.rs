@@ -7,7 +7,7 @@
 #![feature(test)]
 extern crate test;
 
-use std::mem::{forget, replace, size_of, take, transmute};
+use std::mem::{forget, replace, size_of, transmute};
 use std::ops::{Index, IndexMut, Range};
 use std::ptr::{null, null_mut, NonNull};
 use std::sync::atomic::Ordering;
@@ -132,7 +132,17 @@ impl<T: Default> Arr<T> {
             buckets,
         };
     }
-
+    /// 获得容量大小
+    #[inline(always)]
+    pub fn capacity(&self, len: usize) -> usize {
+        if size_of::<T>() == 0 {
+            0
+        } else if len > self.capacity {
+            Location::bucket_capacity(Location::bucket(len - self.capacity)) + self.capacity
+        } else {
+            self.capacity
+        }
+    }
     #[inline(always)]
     pub unsafe fn set_vec_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
@@ -466,10 +476,7 @@ impl<T: Default> Arr<T> {
         // 数据在buckets上的长度
         len = len.saturating_sub(self.capacity);
         // 获得扩容后增加的长度，32+64+128+...
-        let mut loc = Location::of(len + additional);
-        loc.bucket += 1;
-        loc.entry = 0;
-        let mut loc_len = loc.index(0) * multiple;
+        let mut cap = Location::bucket_capacity(Location::bucket(len + additional)) * multiple;
         len *= multiple;
         let mut arr = self.buckets().take();
         if multiple > 1 {
@@ -481,18 +488,18 @@ impl<T: Default> Arr<T> {
             let (_, v) = it.next().unwrap();
             if v.len() > 0 {
                 len = len.saturating_sub(v.len());
-                loc_len = loc_len.saturating_sub(v.len());
+                cap = cap.saturating_sub(v.len());
                 let _ = replace(&mut vec, v);
-                vec.reserve(loc_len);
+                vec.reserve(cap);
             } else {
-                vec.reserve(loc_len);
+                vec.reserve(cap);
                 let vlen = SKIP * multiple;
                 len = len.saturating_sub(vlen);
                 vec.resize_with(vlen, || T::default());
             }
         } else {
             // 将vec扩容
-            vec.reserve(loc_len);
+            vec.reserve(cap);
         }
         let c1 = vec.capacity();
         // println!("settle1: {:?}", (c1, loc_len, len));
@@ -959,7 +966,6 @@ impl<T: Default> BucketArr<T> {
     pub fn insert(&self, location: &Location, value: T) -> T {
         replace(self.load_alloc(location), value)
     }
-
     /// take buckets.
     pub fn take(&self) -> [Vec<T>; BUCKETS] {
         let mut buckets = [0; BUCKETS].map(|_| Vec::new());
@@ -1369,6 +1375,12 @@ impl Location {
         }
     }
     #[inline(always)]
+    pub const fn bucket(index: usize) -> usize {
+        let skipped = index.checked_add(SKIP).expect("exceeded maximum length");
+        let bucket = usize::BITS - skipped.leading_zeros();
+        (bucket as usize) - (SKIP_BUCKET + 1)
+    }
+    #[inline(always)]
     pub const fn of(index: usize) -> Location {
         let skipped = index.checked_add(SKIP).expect("exceeded maximum length");
         let bucket = usize::BITS - skipped.leading_zeros();
@@ -1385,6 +1397,10 @@ impl Location {
     #[inline(always)]
     pub const fn bucket_len(bucket: usize) -> usize {
         1 << (bucket + SKIP_BUCKET)
+    }
+    #[inline(always)]
+    pub const fn bucket_capacity(bucket: usize) -> usize {
+        (1 << (bucket + SKIP_BUCKET + 1)) - SKIP
     }
     #[inline(always)]
     pub const fn index(&self, capacity: usize) -> usize {
@@ -1729,7 +1745,9 @@ mod tests {
             assert_eq!(loc.len, 32);
             assert_eq!(loc.bucket, 0);
             assert_eq!(loc.entry, i);
-            assert_eq!(loc.index(0), i)
+            assert_eq!(loc.index(0), i);
+            assert_eq!(Location::bucket(i), loc.bucket as usize);
+            assert_eq!(Location::bucket_capacity(loc.bucket as usize), 32);
         }
 
         assert_eq!(Location::bucket_len(1), 64);
@@ -1738,7 +1756,9 @@ mod tests {
             assert_eq!(loc.len, 64);
             assert_eq!(loc.bucket, 1);
             assert_eq!(loc.entry, i - 32);
-            assert_eq!(loc.index(0), i)
+            assert_eq!(loc.index(0), i);
+            assert_eq!(Location::bucket(i), loc.bucket as usize);
+            assert_eq!(Location::bucket_capacity(loc.bucket as usize), 96);
         }
 
         assert_eq!(Location::bucket_len(2), 128);
@@ -1747,7 +1767,9 @@ mod tests {
             assert_eq!(loc.len, 128);
             assert_eq!(loc.bucket, 2);
             assert_eq!(loc.entry, i - 96);
-            assert_eq!(loc.index(0), i)
+            assert_eq!(loc.index(0), i);
+            assert_eq!(Location::bucket(i), loc.bucket as usize);
+            assert_eq!(Location::bucket_capacity(loc.bucket as usize), 224);
         }
 
         let max = Location::of(MAX_ENTRIES);
