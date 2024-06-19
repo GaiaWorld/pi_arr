@@ -439,7 +439,7 @@ impl<T: Default> Arr<T> {
                 self.capacity,
             )
         } else {
-            self.buckets().slice(range)
+            self.buckets().slice_row(range, self.capacity)
         }
     }
     #[inline]
