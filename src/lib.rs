@@ -1,6 +1,8 @@
-//! 自动扩展的数组，使用多个槽，每个槽用不扩容的Vec来装元素，当槽位上的Vec长度不够时，不会扩容Vec，而是线程安全的到下一个槽位分配新Vec。
-//! 第一个槽位的Vec长度为32。
-//! 迭代性能比Vec慢1-10倍， 主要损失在切换bucket时，原子操作及缓存失效。
+//! 自动扩展的数组，由一个扩展槽加多个固定槽构成，每个固定槽用不扩容的Vec来装元素。
+//! 当槽位上的Vec长度不够时，不会扩容Vec，而是线程安全的到下一个槽位分配新Vec。
+//! 第一个固定槽位的Vec长度为32。
+//! 固定槽迭代性能比Vec慢1-10倍， 主要损失在切换bucket时，原子操作及缓存失效。
+//! 在整理时，会一次性将所有固定槽元素移动到扩展槽。
 
 #![feature(vec_into_raw_parts)]
 #![feature(const_option)]
@@ -13,6 +15,7 @@ use std::ptr::{null, null_mut, NonNull};
 use std::sync::atomic::Ordering;
 
 use pi_share::{ShareMutex, SharePtr};
+use pi_vec_remain::VecRemain;
 
 /// Creates a [`Arr`] containing the given elements.
 ///
@@ -461,67 +464,90 @@ impl<T: Default> Arr<T> {
         loc.len *= multiple;
         self.buckets().load_alloc(&loc)
     }
-
-    /// 整理内存，将bucket_arr的数据移到vec上，并尝试将当前vec_capacity容量扩容len+additional
-    pub fn settle(&mut self, mut len: usize, additional: usize, multiple: usize) {
+    /// 保留范围内的数组元素并整理，将保留的部分整理到扩展槽中，并将当前vec_capacity容量扩容len+additional
+    pub fn remain_settle(
+        &mut self,
+        range: Range<usize>,
+        len: usize,
+        additional: usize,
+        multiple: usize,
+    ) {
         if size_of::<T>() == 0 || multiple == 0 {
             return;
         }
+        debug_assert!(len >= range.end);
+        debug_assert!(range.end >= range.start);
         let mut vec = to_vec(self.ptr, self.capacity * multiple);
-        if len <= self.capacity {
-            // 数据都在vec上，无需移动
-            return self.reserve(vec, len, additional, multiple);
-        }
-        // println!("settle0: {:?}", (len, self.capacity));
-        // 数据在buckets上的长度
-        len = len.saturating_sub(self.capacity);
-        // 获得扩容后增加的长度，32+64+128+...
-        let mut cap = Location::bucket_capacity(Location::bucket(len + additional)) * multiple;
-        len *= multiple;
-        let mut arr = self.buckets().take();
-        if multiple > 1 {
-            arr = Self::reset_vec(arr, multiple);
-        }
-        let mut it = arr.into_iter().enumerate();
-        if self.capacity == 0 {
-            // 如果原vec为empty，则直接将arr的第一个vec换上
-            let (_, v) = it.next().unwrap();
-            if v.len() > 0 {
-                len = len.saturating_sub(v.len());
-                cap = cap.saturating_sub(v.len());
-                let _ = replace(&mut vec, v);
-                vec.reserve(cap);
-            } else {
-                vec.reserve(cap);
-                let vlen = SKIP * multiple;
-                len = len.saturating_sub(vlen);
-                vec.resize_with(vlen, || T::default());
+        if range.end <= self.capacity {
+            // 数据都在vec上
+            vec.remain(range.start * multiple..range.end * multiple);
+            if len > self.capacity {
+                self.take_buckets(multiple);
             }
-        } else {
-            // 将vec扩容
-            vec.reserve(cap);
+            return self.reserve(vec, range.len(), additional, multiple);
         }
-        let c1 = vec.capacity();
-        // println!("settle1: {:?}", (c1, loc_len, len));
+        // 取出所有的bucket
+        let arr = self.take_buckets(multiple);
+        // 获得扩容后的总容量
+        let cap = Location::bucket_capacity(Location::bucket(range.len() + additional)) * multiple;
+        let mut start = range.start * multiple;
+        let end = range.end * multiple;
+        let mut index = vec.capacity();
+        if vec.capacity() >= cap {
+            // 先将扩展槽的数据根据范围保留
+            start += vec.remain(start..end);
+        } else if vec.capacity() > 0 {
+            let mut new = Vec::with_capacity(cap);
+            // 将扩展槽的数据根据范围保留到新vec中
+            start += vec.remain_to(start..end, &mut new);
+            vec = new;
+        }
         // 将arr的数据移到vec上
-        for (i, mut v) in it {
-            if len == 0 {
+        for (i, mut v) in arr.into_iter().enumerate() {
+            if start >= end {
                 break;
             }
-            if v.len() > 0 {
-                len = len.saturating_sub(v.len());
-                vec.append(&mut v);
+            let mut vlen = v.len();
+            if vlen > 0 {
+                if start >= index + vlen {
+                    index += vlen;
+                    continue;
+                }
+                if vec.capacity() == 0 {
+                    // 如果原vec为empty
+                    if v.capacity() >= cap {
+                        // 并且当前容量大于等于cap，则直接将v换上
+                        _ = replace(&mut vec, v);
+                        vec.remain(start - index..end - index);
+                    } else {
+                        vec.reserve(cap);
+                        v.remain_to(start - index..end - index, &mut vec);
+                    }
+                } else {
+                    v.remain_to(start - index..end - index, &mut vec);
+                }
             } else {
-                let vlen = Location::bucket_len(i) * multiple;
-                len = len.saturating_sub(vlen);
-                vec.resize_with(vec.len() + vlen, || T::default());
+                vlen = Location::bucket_len(i) * multiple;
+                if start >= index + vlen {
+                    index += vlen;
+                    continue;
+                }
+                if vec.capacity() == 0 {
+                    vec.reserve(cap);
+                }
+                vec.resize_with(vec.len() + index + vlen - start, || T::default());
             }
+            index += vlen;
+            start = index;
         }
-        assert_eq!(c1, vec.capacity());
         // 如果容量比len大，则初始化为null元素
         vec.resize_with(vec.capacity(), || T::default());
         self.capacity = vec.capacity() / multiple;
         self.ptr = vec.into_raw_parts().0;
+    }
+    /// 整理内存，将bucket_arr的数据移到vec上，并将当前vec_capacity容量扩容len+additional
+    pub fn settle(&mut self, len: usize, additional: usize, multiple: usize) {
+        self.remain_settle(0..len, len, additional, multiple);
     }
     /// 清理所有数据，释放bucket_arr的内存，并尝试将当前vec_capacity容量扩容len+additional
     /// 释放前，必须先调用clear方法，保证释放其中的数据
@@ -545,6 +571,14 @@ impl<T: Default> Arr<T> {
             self.capacity = vec.capacity() / multiple;
         }
         self.ptr = vec.into_raw_parts().0;
+    }
+    fn take_buckets(&mut self, multiple: usize) -> [Vec<T>; BUCKETS] {
+        // 取出所有的bucket
+        let mut arr = self.buckets().take();
+        if multiple > 1 {
+            arr = Self::reset_vec(arr, multiple);
+        }
+        arr
     }
     fn reset_vec(buckets: [Vec<T>; BUCKETS], multiple: usize) -> [Vec<T>; BUCKETS] {
         buckets.map(|vec| {
@@ -1415,7 +1449,8 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
+    use pcg_rand::Pcg64;
+    use rand::{Rng, SeedableRng};
     use std::sync::{Arc, Mutex};
 
     use test::Bencher;
@@ -1434,29 +1469,84 @@ mod tests {
         assert_eq!(arr[2], 1);
     }
     #[test]
+    fn test22() {
+        println!("test22 start");
+        let mut rng = rand::thread_rng();
+        //let mut rng = Pcg64::seed_from_u64(1);
+        for c in 0..1000 {
+            let mut arr = arr![];
+            let mut vec = vec![];
+            // println!("test22 start c:{}", c);
+            arr.clear(vec.len(), 0, 1);
+            vec.clear();
+            let x = rng.gen_range(0..100) + 2;
+            for _ in 0..x {
+                let r = rng.gen_range(1..1000);
+                // println!("r: {:?}", r);
+                arr.set(r, r);
+                if vec.len() <= r {
+                    vec.resize(r + 1, 0);
+                }
+                vec[r] = r;
+            }
+            match_arr_vec(&vec, &arr);
+            let j = rng.gen_range(vec.len() / 2..vec.len());
+            let k = rng.gen_range(0..j);
+            // println!("vec: {:?}", vec.iter().filter(|r| **r > 0).collect::<Vec<_>>());
+            //println!("kj: {:?}, len:{}", (k, j), vec.len());
+            arr.remain_settle(k..j, vec.len(), 0, 1);
+            vec.remain(k..j);
+            match_arr_vec(&vec, &arr);
+        }
+    }
+    fn match_arr_vec(vec: &Vec<usize>, arr: &Arr<usize>) {
+        // println!(
+        //     "match_arr_vec vec: {:?}, len:{:?}",
+        //     vec.iter().filter(|r| **r > 0).collect::<Vec<_>>(),
+        //     vec.len()
+        // );
+        for i in 0..vec.len() {
+            if vec[i] == 0 {
+                continue;
+            }
+            assert_eq!(vec[i], arr[i]);
+        }
+    }
+    #[test]
     fn test2() {
         println!("test2 start");
         let mut arr = arr![];
         let mut i = 0;
-        let mut rng = rand::thread_rng();
-        for _ in 0..100 {
+        //let mut rng = rand::thread_rng();
+        let mut rng = Pcg64::seed_from_u64(1);
+        for _ in 0..1000 {
             let x = rng.gen_range(0..1000);
             for _ in 0..x {
                 arr.insert(i, i);
                 i += 1;
             }
             check(&arr, i);
-            if rng.gen_range(0..20) == 0 {
+            if rng.gen_range(0..200) == 0 {
                 arr.clear(i, 0, 1);
                 i = 0;
             }
+            if rng.gen_range(0..100) == 0 && i > 20 {
+                let j = rng.gen_range(0..20);
+                arr.remain_settle(j..i, i, rng.gen_range(0..100), 1);
+                for k in 0..i - j {
+                    assert_eq!(arr[k], k + j);
+                }
+                arr.clear(i - j, 0, 1);
+                i = 0;
+            }
             arr.settle(i, rng.gen_range(0..100), 1);
-            if rng.gen_range(0..20) == 0 {
+            if rng.gen_range(0..200) == 0 {
                 arr.clear(i, 0, 1);
                 i = 0;
             }
             check1(&arr, i);
         }
+        println!("test2 arr.vec_capacity(): {}", arr.vec_capacity());
     }
     fn check(arr: &Arr<usize>, len: usize) {
         for i in 0..len {
@@ -1473,8 +1563,9 @@ mod tests {
         println!("test3 start");
         let mut arr = Arr::<u8>::new();
         let mut i = 0;
-        let mut rng = rand::thread_rng();
-        for _ in 0..100 {
+        // let mut rng = rand::thread_rng();
+        let mut rng = Pcg64::seed_from_u64(1);
+        for _ in 0..1000 {
             let x = rng.gen_range(0..1000);
             for _ in 0..x {
                 let r: &mut usize =
@@ -1483,17 +1574,30 @@ mod tests {
                 i += 1;
             }
             check3(&arr, i);
-            if rng.gen_range(0..20) == 0 {
+            if rng.gen_range(0..200) == 0 {
                 arr.clear(i, 0, size_of::<usize>());
                 i = 0;
             }
-            arr.settle(i, rng.gen_range(0..100), size_of::<usize>());
-            if rng.gen_range(0..20) == 0 {
+            if rng.gen_range(0..100) == 0 && i > 20 {
+                let j = rng.gen_range(0..20);
+                println!("test3: c:{:?}, ij: {:?}", arr.vec_capacity(), (i, j));
+                arr.remain_settle(j..i, i, rng.gen_range(0..100), size_of::<usize>());
+                for k in 0..i - j {
+                    let r: &mut usize =
+                        unsafe { transmute(arr.get_multiple(k, size_of::<usize>())) };
+                    assert_eq!(*r, k + j);
+                }
+                arr.clear(i - j, 0, size_of::<usize>());
+                i = 0;
+            }
+            arr.remain_settle(0..i, i, rng.gen_range(0..100), size_of::<usize>());
+            if rng.gen_range(0..200) == 0 {
                 arr.clear(i, 0, size_of::<usize>());
                 i = 0;
             }
             check3(&arr, i);
         }
+        println!("test3 arr.vec_capacity(): {}", arr.vec_capacity());
     }
     fn check3(arr: &Arr<u8>, len: usize) {
         for i in 0..len {
@@ -1686,7 +1790,6 @@ mod tests {
         assert_eq!(Arc::<usize>::strong_count(a1[0].as_ref().unwrap()), 1);
         println!("test_arc1 {:?}", a1[0]);
     }
-
     #[test]
     fn test_arc1() {
         let vec: Vec<Option<Arc<usize>>> = Vec::new();
