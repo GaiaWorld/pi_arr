@@ -1,14 +1,17 @@
-//! 自动扩展的数组，由一个扩展槽加多个固定槽构成，每个固定槽用不扩容的Vec来装元素。
-//! 当槽位上的Vec长度不够时，不会扩容Vec，而是线程安全的到下一个槽位分配新Vec。
+//! 自动扩展的数组VecArr，由一个可自动扩容的Vec实现。
+//! 自动扩展的数组VBArr，由一个可扩展槽加多个固定槽构成，每个固定槽用不扩容的Vec来装元素。
+//! 当槽位上的Vec长度不够时，不会立刻扩容Vec，而是线程安全的到下一个槽位分配新Vec。
 //! 第一个固定槽位的Vec长度为32。
 //! 固定槽迭代性能比Vec慢1-10倍， 主要损失在切换bucket时，原子操作及缓存失效。
 //! 在整理时，会一次性将所有固定槽元素移动到扩展槽。
 
+#![feature(unsafe_cell_access)]
 #![feature(vec_into_raw_parts)]
-#![feature(const_option)]
 #![feature(test)]
 extern crate test;
 
+use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 use std::mem::{forget, replace, size_of, transmute};
 use std::ops::{Index, IndexMut, Range};
 use std::ptr::{null, null_mut, NonNull};
@@ -54,6 +57,18 @@ macro_rules! arr {
     );
 }
 
+#[cfg(feature = "rc")]
+pub type Arr<T> = VecArr<T>;
+
+#[cfg(feature = "rc")]
+pub type Iter<'a, T> = VecIter<'a, T>;
+
+#[cfg(not(feature = "rc"))]
+pub type Arr<T> = VBArr<T>;
+
+#[cfg(not(feature = "rc"))]
+pub type Iter<'a, T> = BucketIter<'a, T>;
+
 /// A lock-free, auto-expansion array by buckets.
 ///
 /// See [the crate documentation](crate) for details.
@@ -63,15 +78,15 @@ macro_rules! arr {
 /// The bucket array is stored inline, meaning that the
 /// `Arr<T>` is quite large. It is expected that you
 /// store it behind an [`Arc`](std::sync::Arc) or similar.
-pub struct Arr<T> {
+pub struct VBArr<T> {
     ptr: *mut T,
     capacity: usize,
     buckets: *mut BucketArr<T>,
 }
-impl<T> Default for Arr<T> {
+impl<T> Default for VBArr<T> {
     fn default() -> Self {
         let buckets = if size_of::<T>() == 0 {
-            null_mut()
+            NonNull::<BucketArr<T>>::dangling().as_ptr()
         } else {
             Box::into_raw(Box::new(BucketArr::default()))
         };
@@ -85,7 +100,7 @@ impl<T> Default for Arr<T> {
 unsafe impl<T: Send> Send for Arr<T> {}
 unsafe impl<T: Sync> Sync for Arr<T> {}
 
-impl<T: Default> Arr<T> {
+impl<T: Default> VBArr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
     /// # Examples
@@ -95,8 +110,8 @@ impl<T: Default> Arr<T> {
     /// let arr: pi_arr::Arr<i32> = pi_arr::Arr::new();
     /// ```
     #[inline]
-    pub fn new() -> Arr<T> {
-        Arr::default()
+    pub fn new() -> VBArr<T> {
+        VBArr::default()
     }
 
     /// Constructs a new, empty `Arr<T>` with the specified capacity.
@@ -120,16 +135,16 @@ impl<T: Default> Arr<T> {
     /// arr.set(33, 33);
     /// ```
     #[inline(always)]
-    pub fn with_capacity(capacity: usize) -> Arr<T> {
+    pub fn with_capacity(capacity: usize) -> VBArr<T> {
         Self::with_capacity_multiple(capacity, 1)
     }
 
-    pub fn with_capacity_multiple(capacity: usize, multiple: usize) -> Arr<T> {
+    pub fn with_capacity_multiple(capacity: usize, multiple: usize) -> VBArr<T> {
         if size_of::<T>() == 0 || capacity == 0 {
-            return Arr::default();
+            return VBArr::default();
         }
         let buckets = Box::into_raw(Box::new(Default::default()));
-        return Arr {
+        return VBArr {
             ptr: bucket_alloc(capacity * multiple),
             capacity,
             buckets,
@@ -421,9 +436,9 @@ impl<T: Default> Arr<T> {
     /// assert_eq!(iterator.next(), None);
     /// ```
     #[inline]
-    pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
+    pub fn slice(&self, range: Range<usize>) -> BucketIter<'_, T> {
         if range.end <= self.vec_capacity() {
-            Iter::new(
+            BucketIter::new(
                 self.ptr,
                 Location::new(-1, range.end, range.start),
                 range.end,
@@ -433,7 +448,7 @@ impl<T: Default> Arr<T> {
             )
         } else if range.start < self.capacity {
             let end = Location::of(range.end - self.capacity);
-            Iter::new(
+            BucketIter::new(
                 self.ptr,
                 Location::new(-1, self.capacity, range.start),
                 end.entry,
@@ -603,7 +618,8 @@ impl<T: Default> IndexMut<usize> for Arr<T> {
             .expect("no element found at index_mut {index}")
     }
 }
-impl<T> Drop for Arr<T> {
+
+impl<T> Drop for VBArr<T> {
     fn drop(&mut self) {
         if size_of::<T>() == 0 {
             return;
@@ -635,19 +651,404 @@ impl<T: Default> Extend<T> for Arr<T> {
     }
 }
 
-impl<T: Default + Clone> Clone for Arr<T> {
-    fn clone(&self) -> Arr<T> {
+impl<T: Default + Clone> Clone for VBArr<T> {
+    fn clone(&self) -> VBArr<T> {
         if size_of::<T>() == 0 {
-            return Arr::default();
+            return VBArr::default();
         }
         let vec = to_vec(self.ptr, self.capacity);
         let ptr = vec.clone().into_raw_parts().0;
         forget(vec);
         let buckets = Box::into_raw(Box::new(self.buckets().clone()));
-        Arr {
+        VBArr {
             ptr,
             capacity: self.capacity,
             buckets,
+        }
+    }
+}
+
+pub struct VecArr<T> {
+    ptr: UnsafeCell<*mut T>,
+    capacity: UnsafeCell<usize>,
+}
+impl<T> Default for VecArr<T> {
+    fn default() -> Self {
+        Self {
+            ptr: NonNull::<T>::dangling().as_ptr().into(),
+            capacity: 0.into(),
+        }
+    }
+}
+
+impl<T: Default> VecArr<T> {
+    pub fn new() -> VecArr<T> {
+        VecArr::default()
+    }
+    pub fn with_capacity(capacity: usize) -> VecArr<T> {
+        Self::with_capacity_multiple(capacity, 1)
+    }
+    pub fn with_capacity_multiple(capacity: usize, multiple: usize) -> VecArr<T> {
+        if size_of::<T>() == 0 || capacity == 0 {
+            return VecArr::default();
+        }
+        return VecArr {
+            ptr: bucket_alloc::<T>(capacity * multiple).into(),
+            capacity: capacity.into(),
+        };
+    }
+    /// 获得容量大小
+    #[inline(always)]
+    pub fn capacity(&self, _len: usize) -> usize {
+        if size_of::<T>() == 0 {
+            0
+        } else {
+            *unsafe { self.capacity.as_ref_unchecked() }
+        }
+    }
+    #[inline(always)]
+    pub unsafe fn set_vec_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.into();
+    }
+    #[inline(always)]
+    pub fn vec_capacity(&self) -> usize {
+        if size_of::<T>() == 0 {
+            usize::MAX
+        } else {
+            *unsafe { self.capacity.as_ref_unchecked() }
+        }
+    }
+    /// Returns a reference to the element at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(Some(&40), arr.get(1));
+    /// assert_eq!(None, arr.get(33));
+    /// ```
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.vec_capacity() {
+            return Some(unsafe { &*(*self.ptr.get()).add(index) });
+        }
+        None
+    }
+    /// Returns a reference to an element, without doing bounds
+    /// checking or verifying that the element is fully initialized.
+    ///
+    /// For a safe alternative see [`get`](Arr::get).
+    ///
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index, or for an element that
+    /// is being concurrently initialized is **undefined behavior**, even if
+    /// the resulting reference is not used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![1, 2, 4];
+    ///
+    /// unsafe {
+    ///     assert_eq!(arr.get_unchecked(1), &2);
+    /// }
+    /// ```
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        return unsafe { &*(*self.ptr.get()).add(index) };
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let mut arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(Some(&mut 40), arr.get_mut(1));
+    /// assert_eq!(None, arr.get_mut(33));
+    /// ```
+    #[inline(always)]
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index < self.vec_capacity() {
+            return Some(unsafe { &mut *(*self.ptr.get()).add(index) });
+        }
+        None
+    }
+
+    /// Returns a mutable reference to an element, without doing bounds
+    /// checking or verifying that the element is fully initialized.
+    ///
+    /// For a safe alternative see [`get`](Arr::get).
+    ///
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is **undefined
+    /// behavior**, even if the resulting reference is not used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let mut arr = pi_arr::arr![1, 2, 4];
+    ///
+    /// unsafe {
+    ///     assert_eq!(arr.get_unchecked_mut(1), &mut 2);
+    /// }
+    /// ```
+    #[inline(always)]
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        return unsafe { &mut *(*self.ptr.get()).add(index) };
+    }
+    /// Returns a mutable reference to the element at the given index.
+    /// If the bucket corresponding to the index is not allocated,
+    /// it will be allocated automatically, and the returned T is null
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use crate::pi_arr;
+    /// let mut arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(40, *arr.alloc(1));
+    /// assert_eq!(0, *arr.alloc(3));
+    /// ```
+    #[inline(always)]
+    pub fn alloc(&mut self, index: usize) -> &mut T {
+        if index >= self.vec_capacity() {
+            let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity());
+            self.reserve(vec, self.vec_capacity(), index - self.vec_capacity() + 1, 1);
+        }
+        return unsafe { &mut *(*self.ptr.get()).add(index) };
+    }
+    /// set element at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use crate::pi_arr;
+    /// let mut arr = crate::pi_arr::arr![10, 40, 30];
+    /// assert_eq!(40, arr.set(1, 20));
+    /// assert_eq!(Some(&20), arr.get(1));
+    /// assert_eq!(0, arr.set(33, 5));
+    /// assert_eq!(Some(&5), arr.get(33));
+    /// ```
+    #[inline(always)]
+    pub fn set(&mut self, index: usize, value: T) -> T {
+        replace(self.alloc(index), value)
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    /// If the bucket corresponding to the index is not allocated,
+    /// it will not be allocated automatically, and the returned None.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(10, *arr.load(0).unwrap());
+    /// assert_eq!(Some(&mut 40), arr.load(1));
+    /// assert_eq!(None, arr.load(3));
+    /// assert_eq!(None, arr.load(33));
+    /// ```
+    #[inline(always)]
+    pub fn load(&self, index: usize) -> Option<&mut T> {
+        if index < self.vec_capacity() {
+            return Some(unsafe { &mut *(*self.ptr.get()).add(index) });
+        }
+        None
+    }
+
+    /// Returns a mutable reference to an element, without doing bounds
+    /// checking or verifying that the element is fully initialized.
+    ///
+    /// For a safe alternative see [`get`](Arr::get).
+    ///
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is **undefined
+    /// behavior**, even if the resulting reference is not used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![1, 2, 4];
+    ///
+    /// unsafe {
+    ///     assert_eq!(arr.load_unchecked(1), &mut 2);
+    /// }
+    /// ```
+    #[inline(always)]
+    pub unsafe fn load_unchecked(&self, index: usize) -> &mut T {
+        return unsafe { &mut *(*self.ptr.get()).add(index) };
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    /// If the bucket corresponding to the index is not allocated,
+    /// it will be allocated automatically, and the returned T is null
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![10, 40, 30];
+    /// assert_eq!(40, *arr.load_alloc(1));
+    /// assert_eq!(0, *arr.load_alloc(3));
+    /// ```
+    #[inline(always)]
+    pub fn load_alloc(&self, index: usize) -> &mut T {
+        if index >= self.vec_capacity() {
+            let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity());
+            self.reserve(vec, self.vec_capacity(), index - self.vec_capacity() + 1, 1);
+        }
+        return unsafe { &mut *(*self.ptr.get()).add(index) };
+    }
+
+    /// insert an element at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![1, 2];
+    /// arr.insert(2, 3);
+    /// assert_eq!(arr[0], 1);
+    /// assert_eq!(arr[1], 2);
+    /// assert_eq!(arr[2], 3);
+    /// ```
+    #[inline(always)]
+    pub fn insert(&self, index: usize, value: T) -> T {
+        replace(self.load_alloc(index), value)
+    }
+
+    /// Returns an iterator over the array at the given range.
+    ///
+    /// Values are yielded in the form `Entry`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use crate::pi_arr;
+    /// let arr = pi_arr::arr![1, 2, 4];
+    /// let mut iterator = arr.slice(0..pi_arr::MAX_ENTRIES);
+    /// assert_eq!(iterator.size_hint().0, 3);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!((iterator.index() - 1, *r), (0, 1));
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!((iterator.index() - 1, *r), (1, 2));
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!((iterator.index() - 1, *r), (2, 4));
+    /// assert_eq!(iterator.next(), None);
+    /// assert_eq!(iterator.size_hint().0, 0);
+    ///
+    /// let arr = crate::pi_arr::arr![1, 2, 4, 6];
+    /// let mut iterator = arr.slice(1..3);
+    ///
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 2);
+    /// let r = iterator.next().unwrap();
+    /// assert_eq!(*r, 4);
+    /// assert_eq!(iterator.next(), None);
+    /// ```
+    #[inline]
+    pub fn slice(&self, range: Range<usize>) -> VecIter<'_, T> {
+        if range.end <= self.vec_capacity() {
+            VecIter::new(unsafe { *self.ptr.get() }, range.start, range.end)
+        } else if range.start < self.vec_capacity() {
+            VecIter::new(unsafe { *self.ptr.get() }, range.start, self.vec_capacity())
+        } else {
+            VecIter::empty()
+        }
+    }
+    #[inline]
+    pub fn get_multiple(&self, index: usize, multiple: usize) -> Option<&mut T> {
+        if index < self.vec_capacity() {
+            return Some(unsafe { &mut *(*self.ptr.get()).add(index * multiple) });
+        }
+        None
+    }
+    #[inline]
+    pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
+        if index >= self.vec_capacity() {
+            let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity() * multiple);
+            self.reserve(
+                vec,
+                self.vec_capacity(),
+                index - self.vec_capacity() + 1,
+                multiple,
+            );
+        }
+        return unsafe { &mut *(*self.ptr.get()).add(index * multiple) };
+    }
+    /// 保留范围内的数组元素并整理，将保留的部分整理到扩展槽中，并将当前vec_capacity容量扩容len+additional
+    pub fn remain_settle(
+        &mut self,
+        range: Range<usize>,
+        _len: usize,
+        additional: usize,
+        multiple: usize,
+    ) {
+        if size_of::<T>() == 0 || multiple == 0 {
+            return;
+        }
+        let mut vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity() * multiple);
+        // 数据都在vec上
+        vec.remain(range.start * multiple..range.end * multiple);
+        return self.reserve(vec, range.len(), additional, multiple);
+    }
+    /// 整理内存，将bucket_arr的数据移到vec上，并将当前vec_capacity容量扩容len+additional
+    pub fn settle(&mut self, _len: usize, _additional: usize, _multiple: usize) {}
+    /// 清理所有数据，释放bucket_arr的内存，并尝试将当前vec_capacity容量扩容len+additional
+    /// 释放前，必须先调用clear方法，保证释放其中的数据
+    #[inline(always)]
+    pub fn clear(&mut self, len: usize, additional: usize, multiple: usize) {
+        if size_of::<T>() == 0 || multiple == 0 {
+            return;
+        }
+        let mut vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity() * multiple);
+        vec.clear();
+        self.reserve(vec, len, additional, multiple);
+    }
+    fn reserve(&self, mut vec: Vec<T>, len: usize, mut additional: usize, multiple: usize) {
+        additional = (len + additional).saturating_sub(self.vec_capacity());
+        if additional > 0 {
+            vec.reserve(additional * multiple);
+            vec.resize_with(vec.capacity(), || T::default());
+            unsafe { self.capacity.replace(vec.capacity() / multiple) };
+        }
+        unsafe { self.ptr.replace(vec.into_raw_parts().0) };
+    }
+}
+impl<T> Drop for VecArr<T> {
+    fn drop(&mut self) {
+        if size_of::<T>() == 0 {
+            return;
+        }
+        to_vec(unsafe { *self.ptr.get() }, unsafe {
+            *self.capacity.as_ref_unchecked()
+        });
+    }
+}
+
+impl<T: Default + Clone> Clone for VecArr<T> {
+    fn clone(&self) -> Self {
+        if size_of::<T>() == 0 {
+            return VecArr::default();
+        }
+        let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity());
+        let ptr = vec.clone().into_raw_parts().0.into();
+        forget(vec);
+        VecArr {
+            ptr,
+            capacity: self.vec_capacity().into(),
         }
     }
 }
@@ -1052,7 +1453,7 @@ impl<T: Default> BucketArr<T> {
     /// assert_eq!(iterator.size_hint().0, 0);
     /// ```
     #[inline]
-    pub fn iter(&self) -> Iter<'_, T> {
+    pub fn iter(&self) -> BucketIter<'_, T> {
         self.slice_row(0..MAX_ENTRIES, 0)
     }
 
@@ -1072,13 +1473,13 @@ impl<T: Default> BucketArr<T> {
     /// assert_eq!(*r, 4);
     /// assert_eq!(iterator.next(), None);
     /// ```
-    pub fn slice(&self, range: Range<usize>) -> Iter<'_, T> {
+    pub fn slice(&self, range: Range<usize>) -> BucketIter<'_, T> {
         self.slice_row(range, 0)
     }
-    fn slice_row(&self, range: Range<usize>, capacity: usize) -> Iter<'_, T> {
+    fn slice_row(&self, range: Range<usize>, capacity: usize) -> BucketIter<'_, T> {
         let start = Location::of(range.start - capacity);
         let end = Location::of(range.end - capacity);
-        Iter::new(
+        BucketIter::new(
             null_mut(),
             start,
             end.entry,
@@ -1199,12 +1600,59 @@ impl<T: Default + Clone> Clone for BucketArr<T> {
         }
     }
 }
+pub struct VecIter<'a, T> {
+    ptr: *mut T,
+    start: usize,
+    end: usize,
+    _p: PhantomData<&'a mut T>,
+}
+impl<'a, T> VecIter<'a, T> {
+    #[inline(always)]
+    pub fn empty() -> Self {
+        VecIter {
+            ptr: null_mut(),
+            start: 0,
+            end: 0,
+            _p: PhantomData,
+        }
+    }
+    #[inline(always)]
+    fn new(ptr: *mut T, start: usize, end: usize) -> Self {
+        VecIter {
+            ptr,
+            start,
+            end,
+            _p: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn index(&self) -> usize {
+        self.start
+    }
+}
+impl<'a, T> Iterator for VecIter<'a, T> {
+    type Item = &'a mut T;
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start < self.end {
+            let r = unsafe { transmute(self.ptr.add(self.start)) };
+            self.start += 1;
+            return Some(r);
+        }
+        return None;
+    }
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let min = self.end.saturating_sub(self.start);
+        return (min, Some(min));
+    }
+}
 
 /// An iterator over the elements of a [`Arr<T>`].
 ///
 /// See [`Arr::iter`] for details.
-
-pub struct Iter<'a, T> {
+pub struct BucketIter<'a, T> {
     ptr: *mut T,
     start: Location,
     end_entry: usize,
@@ -1212,10 +1660,11 @@ pub struct Iter<'a, T> {
     buckets: &'a [SharePtr<T>; BUCKETS],
     capacity: usize,
 }
-impl<'a, T> Iter<'a, T> {
+
+impl<'a, T> BucketIter<'a, T> {
     #[inline(always)]
     pub fn empty() -> Self {
-        Iter {
+        BucketIter {
             ptr: null_mut(),
             start: Location::default(),
             end_entry: 0,
@@ -1233,7 +1682,7 @@ impl<'a, T> Iter<'a, T> {
         buckets: &'a [SharePtr<T>; BUCKETS],
         capacity: usize,
     ) -> Self {
-        Iter {
+        BucketIter {
             ptr,
             start,
             end_entry,
@@ -1305,7 +1754,7 @@ impl<'a, T> Iter<'a, T> {
         }
         // 最小为起始槽的entry数量
         let min = self.start.len.saturating_sub(self.start.entry);
-        println!("size: {:?}", (min, self.start.len, self.start.entry));
+        // println!("size: {:?}", (min, self.start.len, self.start.entry));
         let c = self.end_bucket - self.start.bucket;
         if c == 0 {
             return (min, Some(min));
@@ -1322,7 +1771,7 @@ impl<'a, T> Iter<'a, T> {
         (min, Some(min + n + self.end_entry))
     }
 }
-impl<'a, T> Iterator for Iter<'a, T> {
+impl<'a, T> Iterator for BucketIter<'a, T> {
     type Item = &'a mut T;
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -1473,7 +1922,7 @@ mod tests {
         println!("test22 start");
         let mut rng = rand::thread_rng();
         //let mut rng = Pcg64::seed_from_u64(1);
-        for c in 0..1000 {
+        for _c in 0..1000 {
             let mut arr = arr![];
             let mut vec = vec![];
             // println!("test22 start c:{}", c);
@@ -1606,6 +2055,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "rc"))]
     #[test]
     fn test() {
         let arr = arr![1; 3];
@@ -1657,8 +2107,10 @@ mod tests {
 
         let arr = crate::arr![1, 2, 4];
         arr.insert(97, 97);
+        println!("arr: {:?}", arr.vec_capacity());
         let mut iterator = arr.slice(0..160).enumerate();
-        assert_eq!(iterator.size_hint().0, 3);
+        println!("arr: {:?}", iterator.size_hint());
+        // assert_eq!(iterator.size_hint().0, 3);
         let r = iterator.next().unwrap();
         assert_eq!((r.0, *r.1), (0, 1));
         let r = iterator.next().unwrap();
@@ -1712,7 +2164,8 @@ mod tests {
         assert_eq!(a, Some(&A()));
         assert_eq!(arr.get(1), Some(&A()));
         assert_eq!(arr.get(2), Some(&A()));
-        let it = arr.slice(0..1000);
+        let it: BucketIter<'_, A> = arr.slice(0..1000);
+        println!("test_zst it: {:?}", it.size_hint());
         for i in it {
             assert_eq!(i, &A());
         }

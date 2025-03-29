@@ -1,6 +1,6 @@
 [package]
 name = "pi_arr"
-version = "0.20.0"
+version = "0.20.1"
 authors = ["zmax <zmax@gaia.world>"]
 edition = "2021"
 description = "lock-free & auto-expansion array"
@@ -11,6 +11,9 @@ keywords = ["pi", "array", "pi_arr"]
 [dependencies]
 pi_share = "0.5"
 pi_vec_remain = "0.2"
+
+[features]
+rc = ["pi_share/rc"]
 
 [dev-dependencies]
 rand = "0.8"
