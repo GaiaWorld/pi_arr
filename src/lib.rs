@@ -83,6 +83,7 @@ pub struct VBArr<T> {
     capacity: usize,
     buckets: *mut BucketArr<T>,
 }
+#[cfg(not(feature = "rc"))]
 impl<T> Default for VBArr<T> {
     fn default() -> Self {
         let buckets = if size_of::<T>() == 0 {
@@ -100,6 +101,7 @@ impl<T> Default for VBArr<T> {
 unsafe impl<T: Send> Send for Arr<T> {}
 unsafe impl<T: Sync> Sync for Arr<T> {}
 
+#[cfg(not(feature = "rc"))]
 impl<T: Default> VBArr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
@@ -628,21 +630,21 @@ impl<T> Drop for VBArr<T> {
         unsafe { drop(Box::from_raw(self.buckets)) };
     }
 }
-
-impl<T: Default> FromIterator<T> for Arr<T> {
+#[cfg(not(feature = "rc"))]
+impl<T: Default> FromIterator<T> for VBArr<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
 
         let (lower, _) = iter.size_hint();
-        let mut arr = Arr::with_capacity(lower);
+        let mut arr = VBArr::with_capacity(lower);
         for (i, value) in iter.enumerate() {
             arr.set(i, value);
         }
         arr
     }
 }
-
-impl<T: Default> Extend<T> for Arr<T> {
+#[cfg(not(feature = "rc"))]
+impl<T: Default> Extend<T> for VBArr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         for (i, value) in iter.enumerate() {
@@ -650,7 +652,7 @@ impl<T: Default> Extend<T> for Arr<T> {
         }
     }
 }
-
+#[cfg(not(feature = "rc"))]
 impl<T: Default + Clone> Clone for VBArr<T> {
     fn clone(&self) -> VBArr<T> {
         if size_of::<T>() == 0 {
@@ -1038,6 +1040,29 @@ impl<T> Drop for VecArr<T> {
     }
 }
 
+
+impl<T: Default> FromIterator<T> for VecArr<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+
+        let (lower, _) = iter.size_hint();
+        let mut arr = VecArr::with_capacity(lower);
+        for (i, value) in iter.enumerate() {
+            arr.set(i, value);
+        }
+        arr
+    }
+}
+
+impl<T: Default> Extend<T> for VecArr<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let iter = iter.into_iter();
+        for (i, value) in iter.enumerate() {
+            self.set(i, value);
+        }
+    }
+}
+
 impl<T: Default + Clone> Clone for VecArr<T> {
     fn clone(&self) -> Self {
         if size_of::<T>() == 0 {
@@ -1106,6 +1131,7 @@ pub struct BucketArr<T> {
     buckets: [SharePtr<T>; BUCKETS],
     lock: ShareMutex<()>,
 }
+#[cfg(not(feature = "rc"))]
 impl<T> Default for BucketArr<T> {
     fn default() -> Self {
         let buckets = [null_mut(); BUCKETS];
@@ -1119,6 +1145,7 @@ impl<T> Default for BucketArr<T> {
 unsafe impl<T: Send> Send for BucketArr<T> {}
 unsafe impl<T: Sync> Sync for BucketArr<T> {}
 
+#[cfg(not(feature = "rc"))]
 impl<T: Default> BucketArr<T> {
     /// Constructs a new, empty `Arr<T>`.
     ///
@@ -1531,6 +1558,7 @@ impl<T: Default> BucketArr<T> {
     }
 }
 
+#[cfg(not(feature = "rc"))]
 impl<T: Default> Index<usize> for BucketArr<T> {
     type Output = T;
     #[inline(always)]
@@ -1539,6 +1567,7 @@ impl<T: Default> Index<usize> for BucketArr<T> {
             .expect("no element found at index {index}")
     }
 }
+#[cfg(not(feature = "rc"))]
 impl<T: Default> IndexMut<usize> for BucketArr<T> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
@@ -1546,6 +1575,7 @@ impl<T: Default> IndexMut<usize> for BucketArr<T> {
             .expect("no element found at index_mut {index}")
     }
 }
+#[cfg(not(feature = "rc"))]
 impl<T> Drop for BucketArr<T> {
     fn drop(&mut self) {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
@@ -1559,6 +1589,8 @@ impl<T> Drop for BucketArr<T> {
     }
 }
 
+
+#[cfg(not(feature = "rc"))]
 impl<T: Default> FromIterator<T> for BucketArr<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
@@ -1572,6 +1604,7 @@ impl<T: Default> FromIterator<T> for BucketArr<T> {
     }
 }
 
+#[cfg(not(feature = "rc"))]
 impl<T: Default> Extend<T> for BucketArr<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
@@ -1581,6 +1614,7 @@ impl<T: Default> Extend<T> for BucketArr<T> {
     }
 }
 
+#[cfg(not(feature = "rc"))]
 impl<T: Default + Clone> Clone for BucketArr<T> {
     fn clone(&self) -> BucketArr<T> {
         let mut buckets: [*mut T; BUCKETS] = [null_mut(); BUCKETS];
@@ -1661,6 +1695,7 @@ pub struct BucketIter<'a, T> {
     capacity: usize,
 }
 
+#[cfg(not(feature = "rc"))]
 impl<'a, T> BucketIter<'a, T> {
     #[inline(always)]
     pub fn empty() -> Self {
@@ -1771,6 +1806,7 @@ impl<'a, T> BucketIter<'a, T> {
         (min, Some(min + n + self.end_entry))
     }
 }
+#[cfg(not(feature = "rc"))]
 impl<'a, T> Iterator for BucketIter<'a, T> {
     type Item = &'a mut T;
     #[inline(always)]
@@ -1823,6 +1859,7 @@ fn bucket_alloc<T: Default>(len: usize) -> *mut T {
     entries.resize_with(entries.capacity(), || T::default());
     entries.into_raw_parts().0
 }
+#[cfg(not(feature = "rc"))]
 fn bucket_init<T: Default>(share_ptr: &SharePtr<T>, len: usize, lock: &ShareMutex<()>) -> *mut T {
     let _lock = lock.lock();
     let mut ptr = share_ptr.load(Ordering::Relaxed);
