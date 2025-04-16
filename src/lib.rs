@@ -981,7 +981,7 @@ impl<T: Default> VecArr<T> {
     }
     #[inline]
     pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
-        if index >= self.vec_capacity() {
+        if index >= self.vec_capacity() && multiple != 0 {
             let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity() * multiple);
             self.reserve(
                 vec,
