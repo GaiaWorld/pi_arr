@@ -473,6 +473,17 @@ impl<T: Default> VBArr<T> {
         loc.entry *= multiple;
         self.buckets().load(&loc)
     }
+
+    #[inline]
+    pub fn get_multiple_unchecked(&self, index: usize, multiple: usize) -> &mut T {
+        if index < self.vec_capacity() {
+            return unsafe { &mut *self.ptr.add(index * multiple) };
+        }
+        let mut loc = Location::of(index - self.capacity);
+        loc.entry *= multiple;
+        unsafe { self.buckets().load_unchecked(&loc) }
+    }
+
     #[inline]
     pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
         if index < self.vec_capacity() {
@@ -978,6 +989,11 @@ impl<T: Default> VecArr<T> {
             return Some(unsafe { &mut *(*self.ptr.get()).add(index * multiple) });
         }
         None
+    }
+    #[inline]
+    pub fn get_multiple_unchecked(&self, index: usize, multiple: usize) -> &mut T {
+        debug_assert!(index < self.vec_capacity());
+        unsafe { &mut *(*self.ptr.get()).add(index * multiple) }
     }
     #[inline]
     pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
