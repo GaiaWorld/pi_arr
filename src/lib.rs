@@ -8,6 +8,7 @@
 #![feature(unsafe_cell_access)]
 #![feature(vec_into_raw_parts)]
 #![feature(test)]
+#[cfg(not(target_arch = "wasm32"))]
 extern crate test;
 
 use std::cell::UnsafeCell;
