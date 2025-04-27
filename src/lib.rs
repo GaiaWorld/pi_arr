@@ -8,8 +8,6 @@
 #![feature(unsafe_cell_access)]
 #![feature(vec_into_raw_parts)]
 #![feature(test)]
-// 当编译wasm时启用重新编译Rust标准库使用test做基准测试会出现重复链接的编译错误
-#[cfg(not(target_arch = "wasm32"))]
 extern crate test;
 
 use std::cell::UnsafeCell;
@@ -693,6 +691,12 @@ impl<T: Default> VecArr<T> {
         Self::with_capacity_multiple(capacity, 1)
     }
     pub fn with_capacity_multiple(capacity: usize, multiple: usize) -> VecArr<T> {
+        if multiple == 0 {
+            return Self {
+                ptr: NonNull::<T>::dangling().as_ptr().into(),
+                capacity: usize::MAX.into(),
+            }
+        }
         if size_of::<T>() == 0 || capacity == 0 {
             return VecArr::default();
         }
@@ -981,7 +985,7 @@ impl<T: Default> VecArr<T> {
     }
     #[inline]
     pub fn load_alloc_multiple(&self, index: usize, multiple: usize) -> &mut T {
-        if index >= self.vec_capacity() && multiple != 0 {
+        if index >= self.vec_capacity() {
             let vec = to_vec(unsafe { *self.ptr.get() }, self.vec_capacity() * multiple);
             self.reserve(
                 vec,
@@ -1036,9 +1040,13 @@ impl<T> Drop for VecArr<T> {
         if size_of::<T>() == 0 {
             return;
         }
-        to_vec(unsafe { *self.ptr.get() }, unsafe {
+        let len = unsafe {
             *self.capacity.as_ref_unchecked()
-        });
+        };
+        if len == usize::MAX {
+            return;
+        }
+        to_vec(unsafe { *self.ptr.get() }, len);
     }
 }
 
