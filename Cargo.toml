@@ -1,6 +1,6 @@
 [package]
 name = "pi_arr"
-version = "0.20.5"
+version = "0.21.0"
 authors = ["zmax <zmax@gaia.world>"]
 edition = "2021"
 description = "lock-free & auto-expansion array"
@@ -11,6 +11,7 @@ keywords = ["pi", "array", "pi_arr"]
 [dependencies]
 pi_share = "0.5"
 pi_vec_remain = "0.2"
+pi_buckets = {path = "../pi_buckets", version = "0.1.0"}
 
 [features]
 rc = ["pi_share/rc"]
