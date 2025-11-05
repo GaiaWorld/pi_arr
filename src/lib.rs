@@ -18,7 +18,9 @@ use std::ops::{Index, IndexMut, Range};
 use std::ptr::{null_mut, NonNull};
 
 #[cfg(not(feature = "rc"))]
-use pi_buckets::{bucket_alloc, BucketIter, Buckets, Location, SKIP};
+use pi_buckets::{BucketIter, Location, SKIP};
+
+use pi_buckets::{bucket_alloc, Buckets, BUCKETS};
 
 use pi_vec_remain::VecRemain;
 
@@ -495,6 +497,8 @@ impl<T: Default> VBArr<T> {
             vec = replace(&mut arr[0], Vec::new());
             // 保留范围内的数据
             vec.remain(range.start..range.end);
+            // println!("rang: {:?}, len: {}, capacity: {}", range, vec.len(), vec.capacity());
+            vec.resize_with(vec.capacity(), || T::default());
             self.capacity = vec.capacity();
             self.ptr = vec.into_raw_parts().0;
             return;
@@ -1415,5 +1419,12 @@ mod tests {
 
         let x = arr[0].as_ref().unwrap().lock().unwrap();
         assert_eq!(*x, 2);
+    }
+
+    #[test]
+    fn test_mutex2() {
+        let mut arr: Arr<Arr<i32>> = Arr::default();
+        let _ =  arr.load_alloc(1);
+        arr.settle(2, 0);
     }
 }
