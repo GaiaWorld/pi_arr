@@ -1,138 +1,61 @@
 # pi_arr
 
-[![Crate](https://img.shields.io/crates/v/pi_arr?style=for-the-badge)](https://crates.io/crates/pi_arr)
-[![Github](https://img.shields.io/badge/github-pi_arr-success?style=for-the-badge)](https://github.com/GaiaWorld/pi_arr)
-[![Docs](https://img.shields.io/badge/docs.rs-0.2.2-4d76ae?style=for-the-badge)](https://docs.rs/pi_arr)
+默认初始化的自动扩展数组。默认 `Arr<T> = VBArr<T>`，启用 `rc` 后为单线程 `VecArr<T>`。两种具体类型均可直接使用。
 
+## 存储与访问
 
-# pi_arr - 高性能自动扩展数组库
+- `VBArr` 拥有已初始化的连续 `Vec<T>` 与 `Buckets<T>`。连续区访问比较索引与初始化长度后读取缓存指针，扩展桶不会移动已有元素。
+- `with_capacity(n)` 默认初始化恰好 n 个连续元素，`vec_capacity()` 返回初始化长度而非分配器容量。
+- 没有逻辑长度，已分配桶中所有默认值均可访问，未分配桶返回 None。Extend 从零开始覆盖。
+- `get`、`slice` 和 `segments` 只提供共享引用；`get_mut`、`alloc`、`set` 要求独占数组。
+- `slice(range)` 统一遍历连续区与桶并跳过未分配空隙；`segments(range)` 返回裁剪后的连续共享切片。迭代器 `index() - 1` 为刚返回元素的实际索引。
+- ZST 遵守正常初始化、Clone、Drop 规则，不再假定无限个默认实例存在。
 
-本库提供了两种自动扩展的数组实现，针对不同环境优化：
+## 共享访问
 
-## 结构体
+`load`、`load_unchecked`、`load_alloc`、`insert` 均为 unsafe。所选元素在返回可变引用存活期间不得有其他引用或并发访问；迭代器和切片也会借用元素。调用方负责同步，整理与释放必须等待所有借用结束。
 
-### `VBArr` (基于桶的扩展数组)
-- **设计目标**：多线程环境使用
-- **核心机制**：主数组(可扩展Vec) + 辅助数组(固定大小桶)
-- **扩展方式**：主数组满时，线程安全地在辅助桶分配新数组
-- **内存整理**：支持`settle()`合并所有数据到主数组
-- **线程安全**：需外部保证不会同时访问同一元素
+`VBArr::load_alloc_ptr(index)` 安全返回借用裸指针，必要时并发分配完整默认初始化桶，不创建可变引用。解引用须遵守别名、同步和生命周期规则，不得释放指针。可用于未来 SlotMap 或内部可变元素。
 
-### `VecArr` (基于Vec的扩展数组)
-- **设计目标**：WASM环境专用
-- **核心机制**：单个自动扩展的Vec
-- **特点**：实现简单，无桶结构
-- **线程安全**：非线程安全实现
+共享引用、slice/segments 与裸前缀迭代允许通过元素内部的 UnsafeCell 合法修改，例如 Atomic 或 Mutex 的共享方法；跨线程仍须正确同步。禁止在重叠共享借用存活期间构造整个元素的 `&mut T` 或替换整个元素，即使 T 含有 UnsafeCell。裸前缀迭代的“无冲突修改”要求不禁止这类合法内部可变访问。
 
+`VecArr::load_alloc_ptr` 为 unsafe。共享增长时整个数组不得有存活引用、迭代器、segments 或将继续使用的旧裸指针，也不得有任何并发访问。增长使所有旧地址失效。VecArr 不实现 Sync，安全共享方法不扩容。
 
-## 特性
+VBArr 的 Send 要求 T: Send，Sync 要求 T: Send + Sync。
 
-### 核心能力
-✅ **零拷贝访问** - 直接指针操作避免内存拷贝  
-✅ **ZST支持** - 完美处理零大小类型  
-🔧 **内存整理** - `settle()` 整合分桶数据到主数组  
-🔒 **细粒度锁** - 分桶初始化使用轻量级锁  
+## 整理与 Panic
 
-## 性能指标
+`remain_settle(range, len, additional)` 将保留范围前移到零，未分配空隙补默认值。连续区至少覆盖保留长度加 additional，并保留原连续长度下限。要求 range.start <= range.end <= len。
 
-### 容量限制
-| 类型       | 最大元素数          | 内存占用          |
-|-----------|-------------------|-----------------|
-| VecArr    | usize::MAX        | O(n)           |
-| VBArr     | 2^32 - 32 ≈42.9亿 | O(n)   |
+`settle(len, additional)` 仅保留 0..len：未分配空隙与 len 之后的整个连续尾部均重新默认初始化，两种实现语义一致。`clear(len, additional)` 析构全部旧元素与桶，再重建至少原连续长度及 len + additional 的默认连续区。
 
-### 操作耗时（参考值）
-| 操作       | VecArr  | VBArr   |
-|-----------|--------|--------|
-| 随机读取    | 1-3 ns | 5-8 ns |
-| 顺序迭代    | 2ns/元素| 5-15ns/元素|
-| 扩容操作    | O(n)   | O(1)   |
+Default 或 Clone panic 时 RAII 回收已初始化值，克隆源始终保持所有权。整理与清理不是事务：panic 后数据可能已释放或只剩部分初始化连续区，但数组仍有效，可再次使用和析构。析构 panic 不提供事务回滚；展开期间再次 panic 遵循 Rust 终止规则。
 
-## 快速入门
+## API 迁移
 
-### 安装
-```toml
-[dependencies]
-pi_arr = "0.30"
-```
+- 移除公开拥有所有权的 buckets 裸指针，外部不能替换或释放内部桶。
+- 共享可变方法改为 unsafe，须先证明完整别名与生命周期契约，不能机械增加 unsafe 块。
+- VecIter::Item 从 &mut T 修正为 &T。
+- to_vec(ptr, len) 改为 unsafe，要求唯一所有权和准确的原 Vec 布局、容量；内部不再使用它。
+- VecArr::set_vec_capacity 保留 unsafe 签名，但实际调整初始化长度：增长默认初始化，缩小析构截去元素。
+- ZST 的 vec_capacity 返回有限的初始化长度，get 不再返回凭空构造的实例。
+- 移除 nightly 特性和未使用的 pi_share、pi_vec_remain；依赖本地 ../pi_buckets 修复版本，无新增依赖。
 
-## 主要方法
-
-### 通用方法
-- `with_capacity(capacity: usize) -> Self`  
-  创建指定初始容量的数组
-  
-- `capacity(len: usize) -> usize`  
-  计算给定元素数量所需的总容量
-  
-- `vec_capacity() -> usize`  
-  获取主数组的容量(元素数量)
-  
-- `get(index: usize) -> Option<&T>`  
-  安全获取元素引用(边界检查)
-  
-- `get_mut(index: usize) -> Option<&mut T>`  
-  获取可变元素引用
-  
-- `set(index: usize, value: T) -> T`  
-  设置元素值并返回旧值
-  
-- `insert(index: usize, value: T) -> T`  
-  在指定位置插入元素
-  
-- `slice(range: Range<usize>) -> Iter`  
-  获取指定范围的迭代器
-  
-- `settle(len: usize, additional: usize)`  
-  内存整理(合并数据到主数组)
-  
-- `clear(len: usize, additional: usize)`  
-  清理数据并释放内存
-
-- `alloc(index: usize) -> &mut T`  
-获取或分配元素(自动初始化)
-
-- `load(index: usize) -> Option<&mut T>`  
-安全加载元素(不自动分配)
-
-- `load_alloc(index: usize) -> &mut T`  
-加载或分配元素(自动初始化)
-
-## 类型别名
-- `Arr<T>`: 根据特性选择实现
-  - 启用 "rc" 特性：`VecArr<T>`
-  - 未启用：`VBArr<T>`
-- `Iter<'a, T>`: 对应的迭代器类型
-
-## 宏
-- `arr![]`: 快速创建数组
-  ```rust
-  let a = arr![1, 2, 3];      // 创建包含元素的数组
-  let b = arr![0; 5];         // 创建5个0的数组
-  ```
-
-## 示例代码
+## 示例
 
 ```rust
-use pi_arr::{Arr, arr};
+use pi_arr::{arr, VBArr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn main() {
-    // 创建一个包含元素的数组
-    let mut a = arr![1, 2, 3];
-    // 插入元素
-    a.insert(1, 4);
-    // 获取元素引用
-    let x = a.get(1).unwrap();
-    println!("x: {}", x);
-    // 设置元素值
-    a.set(1, 5);
-    // 获取可变元素引用
-    let mut y = a.get_mut(1).unwrap();
-    *y = 6;
-    println!("y: {}", y);
-}
+let mut a = arr![1, 2, 3];
+a.set(1, 4);
+assert_eq!(a.slice(0..3).copied().collect::<Vec<_>>(), [1, 4, 3]);
+
+let slots = VBArr::<AtomicUsize>::with_capacity(8);
+let ptr = slots.load_alloc_ptr(33);
+// 通过 AtomicUsize 内部可变性访问，不构造独占引用。
+unsafe { &*ptr }.store(7, Ordering::Relaxed);
+assert_eq!(slots[33].load(Ordering::Relaxed), 7);
 ```
 
-## 贡献
-
-欢迎提交Pull Request或Issue来贡献代码或报告问题。
+测试均位于 tests/，支持 stable i686 默认与 rc 配置及 Miri Tree Borrows。此阶段未运行性能基准，不宣称未经测量的纳秒指标。
