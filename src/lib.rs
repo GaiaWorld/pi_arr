@@ -1,6 +1,6 @@
 //! 默认初始化的连续主数组与稳定地址扩展桶。
 //! 共享读取可以与分桶分配并存；共享写入必须遵守 unsafe 的别名与同步契约。
-//! rc 特性选择单线程 VecArr，共享扩容不得与任何存活引用重叠。
+//! rc 特性选择单线程 ContiguousArr，共享扩容不得与任何存活引用重叠。
 //!
 //! 共享可变访问必须显式使用 unsafe：
 //! ```compile_fail
@@ -15,7 +15,7 @@
 use pi_buckets::{BucketIter, BucketSegments, Buckets, Location, MAX_ENTRIES, SKIP};
 use pi_vec_remain::VecRemain;
 use std::cell::{Cell, UnsafeCell};
-use std::mem::{replace, take};
+use std::mem::{replace, size_of, take};
 use std::ops::{Index, IndexMut, Range};
 
 #[macro_export]
@@ -32,47 +32,47 @@ macro_rules! arr {
 }
 
 #[cfg(feature = "rc")]
-pub type Arr<T> = VecArr<T>;
+pub type Arr<T> = ContiguousArr<T>;
 #[cfg(not(feature = "rc"))]
-pub type Arr<T> = VBArr<T>;
+pub type Arr<T> = SegmentedArr<T>;
 #[cfg(feature = "rc")]
-pub type Iter<'a, T> = VecIter<'a, T>;
+pub type Iter<'a, T> = ContiguousIter<'a, T>;
 #[cfg(not(feature = "rc"))]
 pub type Iter<'a, T> = BucketIter<'a, T>;
 
 /// 已初始化的连续区与稳定地址桶，无逻辑长度；Extend 从零覆盖。
-pub struct VBArr<T> {
-    vec: Vec<T>,
+pub struct SegmentedArr<T> {
+    storage: Box<[T]>,
     ptr: *mut T,
     buckets: Buckets<T>,
 }
 // 所有权转移允许 T 转移；共享分桶初始化还要求 T 可跨线程转移。
-unsafe impl<T: Send> Send for VBArr<T> {}
-unsafe impl<T: Send + Sync> Sync for VBArr<T> {}
-impl<T> Default for VBArr<T> {
+unsafe impl<T: Send> Send for SegmentedArr<T> {}
+unsafe impl<T: Send + Sync> Sync for SegmentedArr<T> {}
+impl<T> Default for SegmentedArr<T> {
     fn default() -> Self {
-        let mut vec = Vec::new();
+        let mut vec = Box::<[T]>::default();
         let ptr = vec.as_mut_ptr();
         Self {
-            vec,
+            storage: vec,
             ptr,
             buckets: Buckets::new(),
         }
     }
 }
-impl<T> VBArr<T> {
+impl<T> SegmentedArr<T> {
     /// 连续区已初始化的元素数，不是 Vec 分配器的容量（ZST 同样如此）。
     #[inline(always)]
-    pub fn vec_capacity(&self) -> usize {
-        self.vec.len()
+    pub fn contiguous_len(&self) -> usize {
+        self.storage.len()
     }
     #[inline(always)]
     pub fn get(&self, index: usize) -> Option<&T> {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // 连续区全部初始化；指针只在独占整理时更新。
             return Some(unsafe { &*self.ptr.add(index) });
         }
-        let offset = index - self.vec.len();
+        let offset = index - self.storage.len();
         if offset > MAX_ENTRIES {
             return None;
         }
@@ -80,11 +80,11 @@ impl<T> VBArr<T> {
     }
     #[inline(always)]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // self 独占且元素已初始化。
             return Some(unsafe { &mut *self.ptr.add(index) });
         }
-        let offset = index - self.vec.len();
+        let offset = index - self.storage.len();
         if offset > MAX_ENTRIES {
             return None;
         }
@@ -94,14 +94,14 @@ impl<T> VBArr<T> {
     /// index 必须已分配；引用存活期间不得有冲突写入。
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // 调用方保证该元素不存在冲突访问。
             return unsafe { &*self.ptr.add(index) };
         }
         // 调用方保证桶已分配。
         unsafe {
             self.buckets
-                .get_unchecked(&Location::of(index - self.vec.len()))
+                .get_unchecked(&Location::of(index - self.storage.len()))
         }
     }
     /// # Safety
@@ -115,11 +115,11 @@ impl<T> VBArr<T> {
     #[allow(clippy::mut_from_ref)] // unsafe 契约要求元素独占访问。
     #[inline(always)]
     pub unsafe fn load(&self, index: usize) -> Option<&mut T> {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // 调用方保证元素独占访问，指针来自原始可变分配。
             return Some(unsafe { &mut *self.ptr.add(index) });
         }
-        let offset = index - self.vec.len();
+        let offset = index - self.storage.len();
         if offset > MAX_ENTRIES {
             return None;
         }
@@ -138,13 +138,13 @@ impl<T> VBArr<T> {
     /// 不得构造重叠元素的 &mut T 或替换整个元素，即使 T 含有 UnsafeCell。
     pub fn slice(&self, range: Range<usize>) -> BucketIter<'_, T> {
         // 连续区已初始化且受 self 借用约束；不创建覆盖整个主数组的引用。
-        unsafe { BucketIter::from_raw_prefix(self.ptr, self.vec.len(), &self.buckets, range) }
+        unsafe { BucketIter::from_raw_prefix(self.ptr, self.storage.len(), &self.buckets, range) }
     }
     pub fn segments(&self, range: Range<usize>) -> BucketSegments<'_, T> {
         self.slice(range).into_segments()
     }
 }
-impl<T: Default> VBArr<T> {
+impl<T: Default> SegmentedArr<T> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -152,41 +152,41 @@ impl<T: Default> VBArr<T> {
         let mut vec = initialized(capacity);
         let ptr = vec.as_mut_ptr();
         Self {
-            vec,
+            storage: vec,
             ptr,
             buckets: Buckets::new(),
         }
     }
     /// 给定元素数对应的连续区加完整桶容量；len 是长度而非索引。
-    pub fn capacity(&self, len: usize) -> usize {
-        if len <= self.vec.len() {
-            return self.vec.len();
+    pub fn capacity_for_len(&self, len: usize) -> usize {
+        if len <= self.storage.len() {
+            return self.storage.len();
         }
-        self.vec
+        self.storage
             .len()
             .checked_add(Location::bucket_capacity(Location::bucket(
-                len - self.vec.len() - 1,
+                len - self.storage.len() - 1,
             )))
             .expect("capacity overflow")
     }
     #[inline(always)]
     pub fn alloc(&mut self, index: usize) -> &mut T {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // self 独占且连续区已初始化。
             return unsafe { &mut *self.ptr.add(index) };
         }
-        self.buckets.alloc(&Location::of(index - self.vec.len()))
+        self.buckets.alloc(&Location::of(index - self.storage.len()))
     }
     /// 返回已初始化元素的借用裸指针；分桶分配可与共享读取并发。
     /// 指针不得释放或超出 self 生命周期，访问必须满足边界、别名与同步规则。
     /// 整理或 clear 会使指针失效，不能与指针的使用重叠。
     #[inline(always)]
     pub fn load_alloc_ptr(&self, index: usize) -> *mut T {
-        if index < self.vec.len() {
+        if index < self.storage.len() {
             // 仅计算已初始化连续区内的指针，不创建引用。
             return unsafe { self.ptr.add(index) };
         }
-        let loc = Location::of(index - self.vec.len());
+        let loc = Location::of(index - self.storage.len());
         // 分配器返回完整默认初始化桶，loc.entry 在桶内。
         unsafe { self.buckets.load_alloc_bucket(&loc).add(loc.entry()) }
     }
@@ -217,12 +217,24 @@ impl<T: Default> VBArr<T> {
             .len()
             .checked_add(additional)
             .expect("capacity overflow")
-            .max(self.vec.len());
-        let prefix_len = self.vec.len();
+            .max(self.storage.len());
+        let prefix_len = self.storage.len();
         // 先解除 self 的所有权，再调用可能 panic 的 Default/Drop；局部 RAII 负责回收。
-        let mut result = take(&mut self.vec);
-        self.ptr = self.vec.as_mut_ptr();
-        let buckets = self.buckets.take();
+        let mut result = take(&mut self.storage).into_vec();
+        self.ptr = self.storage.as_mut_ptr();
+        let mut buckets = self.buckets.take();
+        if prefix_len == 0
+            && range.start == 0
+            && range.end == buckets[0].len()
+            && target == buckets[0].len()
+        {
+            let mut first = take(&mut buckets[0]);
+            // Drop excluded buckets before installing the new owner, preserving panic safety.
+            drop(buckets);
+            self.ptr = first.as_mut_ptr();
+            self.storage = first;
+            return;
+        }
         result.reserve(target - result.len());
         result.remain(range.clone());
         for (bucket, values) in buckets.into_iter().enumerate() {
@@ -234,9 +246,10 @@ impl<T: Default> VBArr<T> {
                 .expect("index overflow");
             append_retained(values, start, &range, &mut result);
         }
-        result.resize_with(target, T::default);
+        fill_capacity(&mut result, target);
+        let mut result = result.into_boxed_slice();
         self.ptr = result.as_mut_ptr();
-        self.vec = result;
+        self.storage = result;
     }
     pub fn settle(&mut self, len: usize, additional: usize) {
         self.remain_settle(0..len, len, additional);
@@ -247,37 +260,47 @@ impl<T: Default> VBArr<T> {
         let target = len
             .checked_add(additional)
             .expect("capacity overflow")
-            .max(self.vec.len());
-        let prefix = take(&mut self.vec);
-        self.ptr = self.vec.as_mut_ptr();
+            .max(self.storage.len());
+        let prefix = take(&mut self.storage);
+        self.ptr = self.storage.as_mut_ptr();
         let buckets = self.buckets.take();
         drop(prefix);
         drop(buckets);
         let mut vec = initialized(target);
         self.ptr = vec.as_mut_ptr();
-        self.vec = vec;
+        self.storage = vec;
     }
 }
-impl<T: Clone> Clone for VBArr<T> {
+impl<T: Clone> Clone for SegmentedArr<T> {
     fn clone(&self) -> Self {
-        let mut vec = self.vec.clone();
+        let mut vec = self.storage.clone();
         let ptr = vec.as_mut_ptr();
         // 源存储始终由 self 持有，克隆失败由局部 Vec 回收。
         Self {
-            vec,
+            storage: vec,
             ptr,
             buckets: self.buckets.clone(),
         }
     }
 }
 
-fn initialized<T: Default>(len: usize) -> Vec<T> {
+fn initialized<T: Default>(len: usize) -> Box<[T]> {
     let mut vec = Vec::with_capacity(len);
     vec.resize_with(len, T::default);
-    vec
+    vec.into_boxed_slice()
 }
+// ZST capacity is usize::MAX and must not become an initialized length.
+fn fill_capacity<T: Default>(vec: &mut Vec<T>, minimum: usize) {
+    let len = if size_of::<T>() == 0 {
+        minimum
+    } else {
+        vec.capacity()
+    };
+    vec.resize_with(len, T::default);
+}
+
 fn append_retained<T: Default>(
-    mut values: Vec<T>,
+    values: Box<[T]>,
     start: usize,
     range: &Range<usize>,
     result: &mut Vec<T>,
@@ -289,33 +312,31 @@ fn append_retained<T: Default>(
     }
     let offset = start.saturating_sub(range.start);
     result.resize_with(offset.max(result.len()), T::default);
+    let mut values = values.into_vec();
     values.remain_to(left..right, result);
 }
 
 /// 单线程连续数组。共享扩容仅通过 unsafe 接口，安全接口不会移动共享存储。
-pub struct VecArr<T> {
-    vec: UnsafeCell<Vec<T>>,
+pub struct ContiguousArr<T> {
+    storage: UnsafeCell<Box<[T]>>,
     ptr: Cell<*mut T>,
     len: Cell<usize>,
 }
-// VecArr 不实现 Sync；所有权转移只要求 T: Send。
-unsafe impl<T: Send> Send for VecArr<T> {}
-impl<T> Default for VecArr<T> {
+// ContiguousArr 不实现 Sync；所有权转移只要求 T: Send。
+unsafe impl<T: Send> Send for ContiguousArr<T> {}
+impl<T> Default for ContiguousArr<T> {
     fn default() -> Self {
-        let mut vec = Vec::new();
+        let mut vec = Box::<[T]>::default();
         let ptr = vec.as_mut_ptr();
         Self {
-            vec: UnsafeCell::new(vec),
+            storage: UnsafeCell::new(vec),
             ptr: Cell::new(ptr),
             len: Cell::new(0),
         }
     }
 }
-impl<T> VecArr<T> {
-    pub fn vec_capacity(&self) -> usize {
-        self.len.get()
-    }
-    pub fn capacity(&self, _len: usize) -> usize {
+impl<T> ContiguousArr<T> {
+    pub fn contiguous_len(&self) -> usize {
         self.len.get()
     }
     #[inline(always)]
@@ -334,20 +355,20 @@ impl<T> VecArr<T> {
         Some(unsafe { &mut *self.ptr.get().add(index) })
     }
     /// # Safety
-    /// index 必须小于 vec_capacity；引用存活期间不得扩容、释放或冲突写入。
+    /// index 必须小于 contiguous_len；引用存活期间不得扩容、释放或冲突写入。
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         // 调用方保证已初始化的有效索引与无冲突访问。
         unsafe { &*self.ptr.get().add(index) }
     }
     /// # Safety
-    /// index 必须小于 vec_capacity。
+    /// index 必须小于 contiguous_len。
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         // 独占 self，调用方保证有效索引。
         unsafe { &mut *self.ptr.get().add(index) }
     }
     /// # Safety
     /// 返回引用期间元素必须独占访问，数组不得增长、整理、释放。
-    /// VecArr 不是 Sync；不得并发访问任何共享扩容接口。
+    /// ContiguousArr 不是 Sync；不得并发访问任何共享扩容接口。
     #[allow(clippy::mut_from_ref)] // unsafe 要求所选元素独占访问。
     pub unsafe fn load(&self, index: usize) -> Option<&mut T> {
         if index >= self.len.get() {
@@ -363,13 +384,13 @@ impl<T> VecArr<T> {
         // 调用方保证元素已分配且独占。
         unsafe { self.load(index) }.expect("element not allocated")
     }
-    pub fn slice(&self, range: Range<usize>) -> VecIter<'_, T> {
+    pub fn slice(&self, range: Range<usize>) -> ContiguousIter<'_, T> {
         assert!(range.start <= range.end, "reversed range");
         let end = range.end.min(self.len.get());
         let start = range.start.min(end);
         // 缓存指针覆盖已初始化区间，迭代器生命周期绑定 self。
         let slice = unsafe { std::slice::from_raw_parts(self.ptr.get().add(start), end - start) };
-        VecIter {
+        ContiguousIter {
             iter: slice.iter(),
             index: start,
         }
@@ -380,7 +401,7 @@ impl<T> VecArr<T> {
         (!slice.is_empty()).then_some(slice).into_iter()
     }
 }
-impl<T: Default> VecArr<T> {
+impl<T: Default> ContiguousArr<T> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -388,7 +409,7 @@ impl<T: Default> VecArr<T> {
         let mut vec = initialized(capacity);
         let ptr = vec.as_mut_ptr();
         Self {
-            vec: UnsafeCell::new(vec),
+            storage: UnsafeCell::new(vec),
             ptr: Cell::new(ptr),
             len: Cell::new(capacity),
         }
@@ -396,36 +417,49 @@ impl<T: Default> VecArr<T> {
     /// 改变已初始化长度，不伪造分配器容量。
     /// # Safety
     /// 保留此 unsafe 签名；self 独占，缩小会析构截去的元素，增长会默认初始化。
-    pub unsafe fn set_vec_capacity(&mut self, capacity: usize) {
-        self.resize(capacity);
+    pub unsafe fn resize_contiguous(&mut self, len: usize) {
+        self.resize(len, false);
     }
-    fn resize(&mut self, len: usize) {
-        let vec = self.vec.get_mut();
+    fn resize(&mut self, len: usize, retain_capacity: bool) {
+        if len == self.len.get() {
+            return;
+        }
+        let storage = self.storage.get_mut();
+        let vec = take(storage).into_vec();
         // resize 的 Default 可 panic；先使缓存不再暴露可能失效的旧指针。
         self.len.set(0);
         self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
         // 局部 guard 在 panic 时也更新缓存，保留 Vec 已成功初始化的部分。
         struct Refresh<'a, T> {
-            vec: &'a mut Vec<T>,
+            vec: Vec<T>,
+            storage: &'a mut Box<[T]>,
             ptr: &'a Cell<*mut T>,
             len: &'a Cell<usize>,
         }
         impl<T> Drop for Refresh<'_, T> {
             fn drop(&mut self) {
-                self.ptr.set(self.vec.as_mut_ptr());
-                self.len.set(self.vec.len());
+                let mut storage = take(&mut self.vec).into_boxed_slice();
+                self.ptr.set(storage.as_mut_ptr());
+                self.len.set(storage.len());
+                *self.storage = storage;
             }
         }
-        let guard = Refresh {
+        let mut guard = Refresh {
             vec,
+            storage,
             ptr: &self.ptr,
             len: &self.len,
         };
-        guard.vec.resize_with(len, T::default);
+        if retain_capacity {
+            guard.vec.reserve(len.saturating_sub(guard.vec.len()));
+            fill_capacity(&mut guard.vec, len);
+        } else {
+            guard.vec.resize_with(len, T::default);
+        }
     }
     pub fn alloc(&mut self, index: usize) -> &mut T {
         if index >= self.len.get() {
-            self.resize(index.checked_add(1).expect("index overflow"));
+            self.resize(index.checked_add(1).expect("index overflow"), true);
         }
         // self 独占且扩容后元素已初始化。
         unsafe { &mut *self.ptr.get().add(index) }
@@ -441,15 +475,18 @@ impl<T: Default> VecArr<T> {
     pub unsafe fn load_alloc_ptr(&self, index: usize) -> *mut T {
         if index >= self.len.get() {
             // 调用方保证整个存储独占；先移出 Vec，使 panic 时 self 仍有效。
-            let mut vec = unsafe { take(&mut *self.vec.get()) };
+            let mut vec = unsafe { take(&mut *self.storage.get()) }.into_vec();
             self.len.set(0);
             self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
-            vec.resize_with(index.checked_add(1).expect("index overflow"), T::default);
+            let target = index.checked_add(1).expect("index overflow");
+            vec.reserve(target - vec.len());
+            fill_capacity(&mut vec, target);
+            let mut vec = vec.into_boxed_slice();
             self.ptr.set(vec.as_mut_ptr());
             self.len.set(vec.len());
             // 独占存储契约允许安装新的所有者。
             unsafe {
-                *self.vec.get() = vec;
+                *self.storage.get() = vec;
             }
         }
         // 分配已初始化，index 在范围内。
@@ -479,15 +516,16 @@ impl<T: Default> VecArr<T> {
             .checked_add(additional)
             .expect("capacity overflow")
             .max(self.len.get());
-        let mut result = take(self.vec.get_mut());
+        let mut result = take(self.storage.get_mut()).into_vec();
         self.len.set(0);
         self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
         result.reserve(target - result.len());
         result.remain(range);
-        result.resize_with(target, T::default);
+        fill_capacity(&mut result, target);
+        let mut result = result.into_boxed_slice();
         self.ptr.set(result.as_mut_ptr());
         self.len.set(result.len());
-        *self.vec.get_mut() = result;
+        *self.storage.get_mut() = result;
     }
     pub fn settle(&mut self, len: usize, additional: usize) {
         self.remain_settle(0..len, len, additional);
@@ -497,32 +535,32 @@ impl<T: Default> VecArr<T> {
             .checked_add(additional)
             .expect("capacity overflow")
             .max(self.len.get());
-        let old = take(self.vec.get_mut());
+        let old = take(self.storage.get_mut());
         self.len.set(0);
         self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
         drop(old);
-        self.resize(target);
+        self.resize(target, true);
     }
 }
-impl<T: Clone> Clone for VecArr<T> {
+impl<T: Clone> Clone for ContiguousArr<T> {
     fn clone(&self) -> Self {
         // 安全共享方法不改动 Vec；unsafe 增长契约排除当前共享借用。
-        let mut vec = unsafe { &*self.vec.get() }.clone();
+        let mut vec = unsafe { &*self.storage.get() }.clone();
         let ptr = vec.as_mut_ptr();
         let len = vec.len();
         Self {
-            vec: UnsafeCell::new(vec),
+            storage: UnsafeCell::new(vec),
             ptr: Cell::new(ptr),
             len: Cell::new(len),
         }
     }
 }
 
-pub struct VecIter<'a, T> {
+pub struct ContiguousIter<'a, T> {
     iter: std::slice::Iter<'a, T>,
     index: usize,
 }
-impl<T> VecIter<'_, T> {
+impl<T> ContiguousIter<'_, T> {
     pub fn empty() -> Self {
         Self {
             iter: [].iter(),
@@ -533,7 +571,7 @@ impl<T> VecIter<'_, T> {
         self.index
     }
 }
-impl<'a, T> Iterator for VecIter<'a, T> {
+impl<'a, T> Iterator for ContiguousIter<'a, T> {
     type Item = &'a T;
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -545,7 +583,7 @@ impl<'a, T> Iterator for VecIter<'a, T> {
         self.iter.size_hint()
     }
 }
-impl<T> ExactSizeIterator for VecIter<'_, T> {}
+impl<T> ExactSizeIterator for ContiguousIter<'_, T> {}
 
 macro_rules! impl_array_traits {
     ($name:ident) => {
@@ -577,8 +615,8 @@ macro_rules! impl_array_traits {
         }
     };
 }
-impl_array_traits!(VBArr);
-impl_array_traits!(VecArr);
+impl_array_traits!(SegmentedArr);
+impl_array_traits!(ContiguousArr);
 
 /// 从裸指针接管 Vec 所有权；内部实现不使用此方法。
 /// # Safety

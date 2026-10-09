@@ -1,5 +1,5 @@
 use pcg_rand::Pcg64;
-use pi_arr::{arr, Arr, VBArr, VecArr};
+use pi_arr::{arr, Arr, SegmentedArr, ContiguousArr};
 use rand::{Rng, SeedableRng};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -28,31 +28,31 @@ fn macros_access_clone_and_shared_mutation() {
 }
 #[test]
 fn positive_capacity_initializes_strings_and_atomics() {
-    let a = VBArr::<String>::with_capacity(7);
-    assert_eq!(a.vec_capacity(), 7);
+    let a = SegmentedArr::<String>::with_capacity(7);
+    assert_eq!(a.contiguous_len(), 7);
     for i in 0..7 {
         assert_eq!(a[i], "");
     }
     assert!(a.get(7).is_none());
-    let b = VecArr::<String>::with_capacity(7);
+    let b = ContiguousArr::<String>::with_capacity(7);
     for i in 0..7 {
         assert_eq!(b[i], "");
     }
-    let a = VBArr::<AtomicUsize>::with_capacity(3);
+    let a = SegmentedArr::<AtomicUsize>::with_capacity(3);
     a[1].store(9, Ordering::Relaxed);
     assert_eq!(a[1].load(Ordering::Relaxed), 9);
 }
 
 #[test]
 fn disjoint_shared_writes_do_not_borrow_whole_prefix() {
-    let a = VBArr::<usize>::with_capacity(4);
+    let a = SegmentedArr::<usize>::with_capacity(4);
     let reader = a.get(0).unwrap();
     unsafe {
         *a.load(1).unwrap() = 7;
     }
     assert_eq!(*reader, 0);
     assert_eq!(a[1], 7);
-    let b = VecArr::<usize>::with_capacity(4);
+    let b = ContiguousArr::<usize>::with_capacity(4);
     let reader = b.get(0).unwrap();
     unsafe {
         *b.load_alloc(1) = 9;
@@ -62,15 +62,15 @@ fn disjoint_shared_writes_do_not_borrow_whole_prefix() {
 }
 #[test]
 fn prefix_bucket_iterator_segments_and_boundaries() {
-    let mut a = VBArr::<usize>::with_capacity(3);
+    let mut a = SegmentedArr::<usize>::with_capacity(3);
     a.extend([1, 2, 4]);
     for i in [3, 34, 35, 98, 99, 226] {
         a.set(i, i);
     }
-    assert_eq!(a.capacity(3), 3);
-    assert_eq!(a.capacity(4), 35);
-    assert_eq!(a.capacity(35), 35);
-    assert_eq!(a.capacity(36), 99);
+    assert_eq!(a.capacity_for_len(3), 3);
+    assert_eq!(a.capacity_for_len(4), 35);
+    assert_eq!(a.capacity_for_len(35), 35);
+    assert_eq!(a.capacity_for_len(36), 99);
     assert_eq!(a.slice(1..3).copied().collect::<Vec<_>>(), [2, 4]);
     let parts = a.segments(1..101).collect::<Vec<_>>();
     assert_eq!(
@@ -81,7 +81,7 @@ fn prefix_bucket_iterator_segments_and_boundaries() {
     let mut it = a.slice(32..38);
     for index in 32..38 {
         assert_eq!(it.next(), a.get(index));
-        assert_eq!(it.index(), index + 1);
+        assert_eq!(it.size_hint().1, Some(37 - index));
     }
     assert!(it.next().is_none());
     assert_eq!(a.slice(10..10).count(), 0);
@@ -89,7 +89,7 @@ fn prefix_bucket_iterator_segments_and_boundaries() {
 }
 #[test]
 fn retain_across_unallocated_gaps_fills_defaults() {
-    let mut a = VBArr::<String>::with_capacity(5);
+    let mut a = SegmentedArr::<String>::with_capacity(5);
     a.set(2, "prefix".into());
     a.set(105, "bucket".into());
     a.remain_settle(2..110, 110, 4);
@@ -98,9 +98,9 @@ fn retain_across_unallocated_gaps_fills_defaults() {
     for i in 1..103 {
         assert_eq!(a[i], "");
     }
-    assert_eq!(a.vec_capacity(), 112);
+    assert_eq!(a.contiguous_len(), 112);
     a.clear(1, 0);
-    assert_eq!(a.vec_capacity(), 112);
+    assert_eq!(a.contiguous_len(), 112);
     for i in 0..112 {
         assert_eq!(a[i], "");
     }
@@ -109,16 +109,16 @@ fn retain_across_unallocated_gaps_fills_defaults() {
 
 #[test]
 fn settle_defaults_tail_equally_in_both_arrays() {
-    let mut buckets = VBArr::<String>::with_capacity(4);
-    let mut contiguous = VecArr::<String>::with_capacity(4);
+    let mut buckets = SegmentedArr::<String>::with_capacity(4);
+    let mut contiguous = ContiguousArr::<String>::with_capacity(4);
     buckets.set(0, "retained".into());
     contiguous.set(0, "retained".into());
     buckets.set(3, "discarded".into());
     contiguous.set(3, "discarded".into());
     buckets.settle(1, 0);
     contiguous.settle(1, 0);
-    assert_eq!(buckets.vec_capacity(), 4);
-    assert_eq!(contiguous.vec_capacity(), 4);
+    assert_eq!(buckets.contiguous_len(), 4);
+    assert_eq!(contiguous.contiguous_len(), 4);
     assert_eq!(
         contiguous.slice(0..4).cloned().collect::<Vec<_>>(),
         ["retained", "", "", ""]
@@ -131,14 +131,14 @@ fn settle_defaults_tail_equally_in_both_arrays() {
 
 #[test]
 fn settle_beyond_old_capacity_defaults_gaps_equally() {
-    let mut buckets = VBArr::<String>::with_capacity(4);
-    let mut contiguous = VecArr::<String>::with_capacity(4);
+    let mut buckets = SegmentedArr::<String>::with_capacity(4);
+    let mut contiguous = ContiguousArr::<String>::with_capacity(4);
     buckets.set(3, "retained".into());
     contiguous.set(3, "retained".into());
     buckets.settle(7, 2);
     contiguous.settle(7, 2);
-    assert_eq!(buckets.vec_capacity(), 9);
-    assert_eq!(contiguous.vec_capacity(), 9);
+    assert_eq!(buckets.contiguous_len(), 9);
+    assert_eq!(contiguous.contiguous_len(), 9);
     assert_eq!(contiguous[3], "retained");
     assert!(contiguous.slice(4..9).all(String::is_empty));
     assert_eq!(
@@ -208,7 +208,7 @@ fn clone_preserves_arc_ownership() {
 }
 #[test]
 fn concurrent_disjoint_raw_allocation_and_shared_reads() {
-    let a = Arc::new(VBArr::<AtomicUsize>::with_capacity(3));
+    let a = Arc::new(SegmentedArr::<AtomicUsize>::with_capacity(3));
     let reader = a.get(0).unwrap();
     std::thread::scope(|scope| {
         for index in [1, 3, 34, 35, 99, 100] {
@@ -228,7 +228,7 @@ fn concurrent_disjoint_raw_allocation_and_shared_reads() {
 }
 #[test]
 fn shared_mutex_elements_are_synchronized() {
-    let a = Arc::new(VBArr::<Mutex<usize>>::new());
+    let a = Arc::new(SegmentedArr::<Mutex<usize>>::new());
     a.load_alloc_ptr(0);
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -239,7 +239,7 @@ fn shared_mutex_elements_are_synchronized() {
 }
 #[test]
 fn vecarr_shared_growth_then_reads_and_settle() {
-    let a = VecArr::<String>::with_capacity(2);
+    let a = ContiguousArr::<String>::with_capacity(2);
     unsafe {
         a.insert(65, "value".into());
     }
@@ -252,7 +252,9 @@ fn vecarr_shared_growth_then_reads_and_settle() {
     a.clear(1, 0);
     assert_eq!(a[1], "");
     a.settle(80, 3);
-    assert_eq!(a.vec_capacity(), 83);
+    assert!(a.contiguous_len() >= 83);
+    assert!(a.slice(0..a.contiguous_len()).all(String::is_empty));
+    assert!(a.get(a.contiguous_len()).is_none());
 }
 
 thread_local! {
@@ -297,10 +299,10 @@ impl Drop for Tracked {
 fn default_panics_reclaim_initialization_and_bucket_ownership() {
     reset();
     DEFAULT_LEFT.set(2);
-    assert!(catch_unwind(|| VBArr::<Tracked>::with_capacity(4)).is_err());
+    assert!(catch_unwind(|| SegmentedArr::<Tracked>::with_capacity(4)).is_err());
     assert_eq!(MADE.get(), DROPPED.get());
     reset();
-    let a = VBArr::<Tracked>::with_capacity(3);
+    let a = SegmentedArr::<Tracked>::with_capacity(3);
     DEFAULT_LEFT.set(2);
     assert!(catch_unwind(AssertUnwindSafe(|| a.load_alloc_ptr(4))).is_err());
     assert_eq!(a[0].0, "default");
@@ -312,7 +314,7 @@ fn default_panics_reclaim_initialization_and_bucket_ownership() {
 #[test]
 fn clone_panics_keep_source_owned_and_reclaim_partial_clones() {
     reset();
-    let mut a = VBArr::<Tracked>::with_capacity(3);
+    let mut a = SegmentedArr::<Tracked>::with_capacity(3);
     a.alloc(5);
     for count in [1, 4] {
         CLONE_LEFT.set(count);
@@ -323,7 +325,7 @@ fn clone_panics_keep_source_owned_and_reclaim_partial_clones() {
     drop(a);
     assert_eq!(MADE.get(), DROPPED.get());
     reset();
-    let a = VecArr::<Tracked>::with_capacity(3);
+    let a = ContiguousArr::<Tracked>::with_capacity(3);
     CLONE_LEFT.set(1);
     assert!(catch_unwind(AssertUnwindSafe(|| a.clone())).is_err());
     assert_eq!(a[0].0, "default");
@@ -333,7 +335,7 @@ fn clone_panics_keep_source_owned_and_reclaim_partial_clones() {
 #[test]
 fn settle_and_clear_default_panics_leave_valid_owners() {
     reset();
-    let mut a = VBArr::<Tracked>::with_capacity(2);
+    let mut a = SegmentedArr::<Tracked>::with_capacity(2);
     a.alloc(100);
     DEFAULT_LEFT.set(1);
     assert!(catch_unwind(AssertUnwindSafe(|| a.remain_settle(1..105, 105, 3))).is_err());
@@ -349,13 +351,13 @@ fn settle_and_clear_default_panics_leave_valid_owners() {
 #[test]
 fn vec_growth_default_panic_refreshes_or_empties_cache() {
     reset();
-    let mut a = VecArr::<Tracked>::with_capacity(2);
+    let mut a = ContiguousArr::<Tracked>::with_capacity(2);
     DEFAULT_LEFT.set(1);
     assert!(catch_unwind(AssertUnwindSafe(|| {
         a.alloc(7);
     }))
     .is_err());
-    assert_eq!(a.vec_capacity(), 3);
+    assert_eq!(a.contiguous_len(), 3);
     assert_eq!(a[2].0, "default");
     DEFAULT_LEFT.set(1);
     assert!(catch_unwind(AssertUnwindSafe(|| unsafe {
@@ -403,23 +405,23 @@ impl Drop for PanicDrop {
 fn settle_drop_panics_leave_empty_valid_arrays_and_reclaim_values() {
     for (index, range) in [(0, 1..10), (7, 0..7), (8, 9..10), (9, 8..9)] {
         reset();
-        let mut a = VBArr::<PanicDrop>::with_capacity(8);
+        let mut a = SegmentedArr::<PanicDrop>::with_capacity(8);
         a.alloc(10);
         a.get_mut(index).unwrap().0 = index;
         DROP_PANIC.set(index);
         assert!(catch_unwind(AssertUnwindSafe(|| a.remain_settle(range, 11, 0))).is_err());
-        assert_eq!(a.vec_capacity(), 0);
+        assert_eq!(a.contiguous_len(), 0);
         assert!(a.get(0).is_none());
         a.alloc(0);
         drop(a);
         assert_eq!(MADE.get(), DROPPED.get());
         reset();
-        let mut b = VecArr::<PanicDrop>::with_capacity(11);
+        let mut b = ContiguousArr::<PanicDrop>::with_capacity(11);
         b.get_mut(index).unwrap().0 = index;
         DROP_PANIC.set(index);
         // Exclude each selected value so its destructor runs during settling.
         assert!(catch_unwind(AssertUnwindSafe(|| b.remain_settle(index + 1..11, 11, 0))).is_err());
-        assert_eq!(b.vec_capacity(), 0);
+        assert_eq!(b.contiguous_len(), 0);
         assert!(b.get(0).is_none());
         b.alloc(0);
         drop(b);
@@ -428,8 +430,106 @@ fn settle_drop_panics_leave_empty_valid_arrays_and_reclaim_values() {
 }
 
 #[test]
+fn settle_adopts_complete_first_bucket_without_initializing_or_cloning() {
+    for allocate_later in [false, true] {
+        reset();
+        let mut a = SegmentedArr::<Tracked>::new();
+        a.alloc(0).0 = "first".into();
+        a.alloc(31).0 = "last".into();
+        if allocate_later {
+            a.alloc(40);
+        }
+        let ptr = a.get(0).unwrap() as *const Tracked;
+        let made = MADE.get();
+        DEFAULT_LEFT.set(0);
+        CLONE_LEFT.set(0);
+        a.remain_settle(0..32, if allocate_later { 41 } else { 32 }, 0);
+        assert_eq!(a.get(0).unwrap() as *const Tracked, ptr);
+        assert_eq!(a.contiguous_len(), 32);
+        assert_eq!(a[0].0, "first");
+        assert_eq!(a[31].0, "last");
+        assert!(a.get(32).is_none());
+        assert_eq!(MADE.get(), made);
+        drop(a);
+        assert_eq!(MADE.get(), DROPPED.get());
+    }
+}
+
+#[test]
+fn settle_first_bucket_partial_ranges_and_growth_keep_exact_length() {
+    for (range, additional, expected) in [(0..8, 0, 8), (4..8, 0, 4), (0..32, 1, 33)] {
+        let mut a = SegmentedArr::<usize>::new();
+        for i in 0..32 {
+            a.set(i, i + 1);
+        }
+        let first = range.start + 1;
+        a.remain_settle(range, 32, additional);
+        assert_eq!(a.contiguous_len(), expected);
+        assert_eq!(a[0], first);
+        assert!(a.get(expected).is_none());
+        if additional != 0 {
+            assert_eq!(a[32], 0);
+        }
+    }
+}
+
+#[test]
+fn first_bucket_adoption_drop_panic_leaves_empty_valid_owner() {
+    reset();
+    let mut a = SegmentedArr::<PanicDrop>::new();
+    a.alloc(0);
+    a.alloc(40).0 = 40;
+    DROP_PANIC.set(40);
+    assert!(catch_unwind(AssertUnwindSafe(|| a.remain_settle(0..32, 41, 0))).is_err());
+    assert_eq!(a.contiguous_len(), 0);
+    assert!(a.get(0).is_none());
+    a.alloc(0);
+    drop(a);
+    assert_eq!(MADE.get(), DROPPED.get());
+}
+
+#[test]
+fn growth_retains_full_contiguous_len_and_initializes_spare_slots() {
+    let mut reference = vec![0usize; 32];
+    reference.reserve(1);
+    let expected = reference.capacity();
+    assert!(expected > 33);
+    let mut buckets = SegmentedArr::<usize>::with_capacity(32);
+    buckets.set(31, 7);
+    buckets.set(32, 9);
+    buckets.settle(33, 0);
+    assert_eq!(buckets.contiguous_len(), expected);
+    assert_eq!(buckets[31], 7);
+    assert_eq!(buckets[32], 9);
+    assert!(buckets.slice(33..expected).all(|v| *v == 0));
+    let mut contiguous = ContiguousArr::<usize>::with_capacity(32);
+    contiguous.set(31, 7);
+    contiguous.alloc(32);
+    assert_eq!(contiguous.contiguous_len(), expected);
+    assert_eq!(contiguous[31], 7);
+    assert!(contiguous.slice(32..expected).all(|v| *v == 0));
+    let shared = ContiguousArr::<usize>::with_capacity(32);
+    unsafe { shared.insert(32, 9); }
+    assert_eq!(shared.contiguous_len(), expected);
+    assert_eq!(shared[32], 9);
+    assert!(shared.slice(33..expected).all(|v| *v == 0));
+    let mut settled = ContiguousArr::<usize>::with_capacity(32);
+    settled.settle(33, 0);
+    assert_eq!(settled.contiguous_len(), expected);
+    assert!(settled.slice(0..expected).all(|v| *v == 0));
+    let ptr = contiguous.get(0).unwrap() as *const usize;
+    contiguous.set(expected - 1, 11);
+    assert_eq!(contiguous.get(0).unwrap() as *const usize, ptr);
+    assert!(buckets.get(expected).is_none());
+    assert!(shared.get(expected).is_none());
+    // Explicit length changes remain exact, including shrinking.
+    unsafe { contiguous.resize_contiguous(3); }
+    assert_eq!(contiguous.contiguous_len(), 3);
+}
+
+#[test]
 fn settle_reuses_main_allocations_and_moves_bucket_strings() {
-    let mut a = VBArr::<String>::with_capacity(128);
+    let mut a = SegmentedArr::<String>::with_capacity(128);
     a.set(4, "prefix".into());
     a.set(130, "bucket".into());
     let p = a.get(0).unwrap() as *const String;
@@ -438,7 +538,7 @@ fn settle_reuses_main_allocations_and_moves_bucket_strings() {
     assert_eq!(a[0], "prefix");
     assert_eq!(a[126], "bucket");
     assert!(a.get(128).is_none());
-    let mut b = VecArr::<String>::with_capacity(128);
+    let mut b = ContiguousArr::<String>::with_capacity(128);
     b.set(4, "prefix".into());
     let p = b.get(0).unwrap() as *const String;
     b.remain_settle(4..8, 128, 0);
@@ -466,7 +566,7 @@ impl Drop for Zst {
 #[test]
 fn zst_defaults_and_destructors_match_initialized_slots() {
     reset();
-    let mut a = VBArr::<Zst>::with_capacity(3);
+    let mut a = SegmentedArr::<Zst>::with_capacity(3);
     assert_eq!(MADE.get(), 3);
     a.alloc(3);
     assert_eq!(MADE.get(), 35);
@@ -480,7 +580,7 @@ fn zst_defaults_and_destructors_match_initialized_slots() {
     drop(a);
     assert_eq!(MADE.get(), DROPPED.get());
     reset();
-    let mut a = VecArr::<Zst>::with_capacity(3);
+    let mut a = ContiguousArr::<Zst>::with_capacity(3);
     a.alloc(5);
     let b = a.clone();
     drop(b);
