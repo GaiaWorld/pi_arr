@@ -1,5 +1,5 @@
 use pcg_rand::Pcg64;
-use pi_arr::{arr, Arr, SegmentedArr, ContiguousArr};
+use pi_arr::{arr, Arr, ContiguousArr, SegmentedArr};
 use rand::{Rng, SeedableRng};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -59,6 +59,56 @@ fn disjoint_shared_writes_do_not_borrow_whole_prefix() {
     }
     assert_eq!(*reader, 0);
     assert_eq!(b[1], 9);
+}
+#[test]
+fn moved_boxed_storage_keeps_raw_provenance_and_disjoint_borrows() {
+    let a = SegmentedArr::<usize>::with_capacity(4);
+    let ptr = a.load_alloc_ptr(1);
+    let mut owners = Vec::with_capacity(1);
+    owners.push(a);
+    owners.push(SegmentedArr::new());
+    let mut a = owners.remove(0);
+    let reader = a.get(0).unwrap();
+    unsafe {
+        *ptr = 17;
+    }
+    assert_eq!(*reader, 0);
+    assert_eq!(a[1], 17);
+    a.set(2, 23);
+    unsafe {
+        *ptr = 19;
+    }
+    assert_eq!(a[1], 19);
+    let mut clone = a.clone();
+    clone.set(1, 29);
+    unsafe {
+        *ptr = 31;
+    }
+    assert_eq!(a[1], 31);
+    assert_eq!(clone[1], 29);
+
+    let b = ContiguousArr::<usize>::with_capacity(4);
+    let ptr = unsafe { b.load_alloc_ptr(1) };
+    let mut owners = Vec::with_capacity(1);
+    owners.push(b);
+    owners.push(ContiguousArr::new());
+    let mut b = owners.remove(0);
+    let reader = b.get(0).unwrap();
+    unsafe {
+        *ptr = 37;
+    }
+    assert_eq!(*reader, 0);
+    b.set(2, 41);
+    unsafe {
+        *ptr = 43;
+    }
+    assert_eq!(b[1], 43);
+    let clone = b.clone();
+    unsafe {
+        *ptr = 47;
+    }
+    assert_eq!(clone[1], 43);
+    assert_eq!(b[1], 47);
 }
 #[test]
 fn prefix_bucket_iterator_segments_and_boundaries() {
@@ -509,7 +559,9 @@ fn growth_retains_full_contiguous_len_and_initializes_spare_slots() {
     assert_eq!(contiguous[31], 7);
     assert!(contiguous.slice(32..expected).all(|v| *v == 0));
     let shared = ContiguousArr::<usize>::with_capacity(32);
-    unsafe { shared.insert(32, 9); }
+    unsafe {
+        shared.insert(32, 9);
+    }
     assert_eq!(shared.contiguous_len(), expected);
     assert_eq!(shared[32], 9);
     assert!(shared.slice(33..expected).all(|v| *v == 0));
@@ -523,7 +575,9 @@ fn growth_retains_full_contiguous_len_and_initializes_spare_slots() {
     assert!(buckets.get(expected).is_none());
     assert!(shared.get(expected).is_none());
     // Explicit length changes remain exact, including shrinking.
-    unsafe { contiguous.resize_contiguous(3); }
+    unsafe {
+        contiguous.resize_contiguous(3);
+    }
     assert_eq!(contiguous.contiguous_len(), 3);
 }
 

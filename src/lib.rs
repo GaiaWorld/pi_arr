@@ -42,7 +42,7 @@ pub type Iter<'a, T> = BucketIter<'a, T>;
 
 /// 已初始化的连续区与稳定地址桶，无逻辑长度；Extend 从零覆盖。
 pub struct SegmentedArr<T> {
-    storage: Box<[T]>,
+    storage: OwnedSlice<T>,
     ptr: *mut T,
     buckets: Buckets<T>,
 }
@@ -51,7 +51,7 @@ unsafe impl<T: Send> Send for SegmentedArr<T> {}
 unsafe impl<T: Send + Sync> Sync for SegmentedArr<T> {}
 impl<T> Default for SegmentedArr<T> {
     fn default() -> Self {
-        let mut vec = Box::<[T]>::default();
+        let vec = OwnedSlice::<T>::default();
         let ptr = vec.as_mut_ptr();
         Self {
             storage: vec,
@@ -149,7 +149,7 @@ impl<T: Default> SegmentedArr<T> {
         Self::default()
     }
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut vec = initialized(capacity);
+        let vec = initialized(capacity);
         let ptr = vec.as_mut_ptr();
         Self {
             storage: vec,
@@ -175,7 +175,8 @@ impl<T: Default> SegmentedArr<T> {
             // self 独占且连续区已初始化。
             return unsafe { &mut *self.ptr.add(index) };
         }
-        self.buckets.alloc(&Location::of(index - self.storage.len()))
+        self.buckets
+            .alloc(&Location::of(index - self.storage.len()))
     }
     /// 返回已初始化元素的借用裸指针；分桶分配可与共享读取并发。
     /// 指针不得释放或超出 self 生命周期，访问必须满足边界、别名与同步规则。
@@ -228,7 +229,7 @@ impl<T: Default> SegmentedArr<T> {
             && range.end == buckets[0].len()
             && target == buckets[0].len()
         {
-            let mut first = take(&mut buckets[0]);
+            let first = OwnedSlice::from(take(&mut buckets[0]));
             // Drop excluded buckets before installing the new owner, preserving panic safety.
             drop(buckets);
             self.ptr = first.as_mut_ptr();
@@ -247,7 +248,7 @@ impl<T: Default> SegmentedArr<T> {
             append_retained(values, start, &range, &mut result);
         }
         fill_capacity(&mut result, target);
-        let mut result = result.into_boxed_slice();
+        let result = OwnedSlice::from(result.into_boxed_slice());
         self.ptr = result.as_mut_ptr();
         self.storage = result;
     }
@@ -266,14 +267,14 @@ impl<T: Default> SegmentedArr<T> {
         let buckets = self.buckets.take();
         drop(prefix);
         drop(buckets);
-        let mut vec = initialized(target);
+        let vec = initialized(target);
         self.ptr = vec.as_mut_ptr();
         self.storage = vec;
     }
 }
 impl<T: Clone> Clone for SegmentedArr<T> {
     fn clone(&self) -> Self {
-        let mut vec = self.storage.clone();
+        let vec = self.storage.clone();
         let ptr = vec.as_mut_ptr();
         // 源存储始终由 self 持有，克隆失败由局部 Vec 回收。
         Self {
@@ -284,10 +285,55 @@ impl<T: Clone> Clone for SegmentedArr<T> {
     }
 }
 
-fn initialized<T: Default>(len: usize) -> Box<[T]> {
+// Own the original boxed slice without Box's move-time pointee retags.
+// Only consuming operations reconstruct a Box; borrowed access uses raw pointers.
+struct OwnedSlice<T> {
+    ptr: std::ptr::NonNull<[T]>,
+}
+impl<T> From<Box<[T]>> for OwnedSlice<T> {
+    fn from(values: Box<[T]>) -> Self {
+        // Box::into_raw transfers sole ownership and always returns non-null.
+        Self {
+            ptr: unsafe { std::ptr::NonNull::new_unchecked(Box::into_raw(values)) },
+        }
+    }
+}
+impl<T> Default for OwnedSlice<T> {
+    fn default() -> Self {
+        Self::from(Box::<[T]>::default())
+    }
+}
+impl<T> OwnedSlice<T> {
+    fn len(&self) -> usize {
+        self.ptr.len()
+    }
+    fn as_mut_ptr(&self) -> *mut T {
+        self.ptr.as_ptr() as *mut T
+    }
+    fn into_vec(self) -> Vec<T> {
+        let owner = std::mem::ManuallyDrop::new(self);
+        // Consume the sole owner, with the exact original slice layout.
+        unsafe { Box::from_raw(owner.ptr.as_ptr()) }.into_vec()
+    }
+}
+impl<T> Drop for OwnedSlice<T> {
+    fn drop(&mut self) {
+        // No element borrows survive destruction; restore the sole Box owner.
+        drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
+    }
+}
+impl<T: Clone> Clone for OwnedSlice<T> {
+    fn clone(&self) -> Self {
+        // The caller's shared borrow excludes conflicting whole-element writes.
+        let values = unsafe { std::slice::from_raw_parts(self.as_mut_ptr(), self.len()) };
+        Self::from(values.to_vec().into_boxed_slice())
+    }
+}
+
+fn initialized<T: Default>(len: usize) -> OwnedSlice<T> {
     let mut vec = Vec::with_capacity(len);
     vec.resize_with(len, T::default);
-    vec.into_boxed_slice()
+    OwnedSlice::from(vec.into_boxed_slice())
 }
 // ZST capacity is usize::MAX and must not become an initialized length.
 fn fill_capacity<T: Default>(vec: &mut Vec<T>, minimum: usize) {
@@ -318,7 +364,7 @@ fn append_retained<T: Default>(
 
 /// 单线程连续数组。共享扩容仅通过 unsafe 接口，安全接口不会移动共享存储。
 pub struct ContiguousArr<T> {
-    storage: UnsafeCell<Box<[T]>>,
+    storage: UnsafeCell<OwnedSlice<T>>,
     ptr: Cell<*mut T>,
     len: Cell<usize>,
 }
@@ -326,7 +372,7 @@ pub struct ContiguousArr<T> {
 unsafe impl<T: Send> Send for ContiguousArr<T> {}
 impl<T> Default for ContiguousArr<T> {
     fn default() -> Self {
-        let mut vec = Box::<[T]>::default();
+        let vec = OwnedSlice::<T>::default();
         let ptr = vec.as_mut_ptr();
         Self {
             storage: UnsafeCell::new(vec),
@@ -406,7 +452,7 @@ impl<T: Default> ContiguousArr<T> {
         Self::default()
     }
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut vec = initialized(capacity);
+        let vec = initialized(capacity);
         let ptr = vec.as_mut_ptr();
         Self {
             storage: UnsafeCell::new(vec),
@@ -432,13 +478,13 @@ impl<T: Default> ContiguousArr<T> {
         // 局部 guard 在 panic 时也更新缓存，保留 Vec 已成功初始化的部分。
         struct Refresh<'a, T> {
             vec: Vec<T>,
-            storage: &'a mut Box<[T]>,
+            storage: &'a mut OwnedSlice<T>,
             ptr: &'a Cell<*mut T>,
             len: &'a Cell<usize>,
         }
         impl<T> Drop for Refresh<'_, T> {
             fn drop(&mut self) {
-                let mut storage = take(&mut self.vec).into_boxed_slice();
+                let storage = OwnedSlice::from(take(&mut self.vec).into_boxed_slice());
                 self.ptr.set(storage.as_mut_ptr());
                 self.len.set(storage.len());
                 *self.storage = storage;
@@ -481,7 +527,7 @@ impl<T: Default> ContiguousArr<T> {
             let target = index.checked_add(1).expect("index overflow");
             vec.reserve(target - vec.len());
             fill_capacity(&mut vec, target);
-            let mut vec = vec.into_boxed_slice();
+            let vec = OwnedSlice::from(vec.into_boxed_slice());
             self.ptr.set(vec.as_mut_ptr());
             self.len.set(vec.len());
             // 独占存储契约允许安装新的所有者。
@@ -522,7 +568,7 @@ impl<T: Default> ContiguousArr<T> {
         result.reserve(target - result.len());
         result.remain(range);
         fill_capacity(&mut result, target);
-        let mut result = result.into_boxed_slice();
+        let result = OwnedSlice::from(result.into_boxed_slice());
         self.ptr.set(result.as_mut_ptr());
         self.len.set(result.len());
         *self.storage.get_mut() = result;
@@ -545,7 +591,7 @@ impl<T: Default> ContiguousArr<T> {
 impl<T: Clone> Clone for ContiguousArr<T> {
     fn clone(&self) -> Self {
         // 安全共享方法不改动 Vec；unsafe 增长契约排除当前共享借用。
-        let mut vec = unsafe { &*self.storage.get() }.clone();
+        let vec = unsafe { &*self.storage.get() }.clone();
         let ptr = vec.as_mut_ptr();
         let len = vec.len();
         Self {

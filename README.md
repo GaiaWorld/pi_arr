@@ -4,7 +4,7 @@
 
 ## 存储与访问
 
-- `SegmentedArr` 拥有已初始化的连续 `Box<[T]>` 与 `Buckets<T>`。连续区访问比较索引与初始化长度后读取缓存指针，扩展桶不会移动已有元素。
+- `SegmentedArr` 拥有已初始化的连续 boxed slice 分配与 `Buckets<T>`。私有 `OwnedSlice<T> { ptr: NonNull<[T]> }` 通过 `Box::into_raw` 接管唯一所有权，消费或析构时才用 `Box::from_raw` 恢复；字段不直接持有 Box，也不是 Vec。连续区访问比较索引与初始化长度后读取缓存指针，扩展桶不会移动已有元素。
 - `with_capacity(n)` 默认初始化恰好 n 个连续元素，`contiguous_len()` 返回初始化长度而非分配器容量。
 - 没有逻辑长度，已分配桶中所有默认值均可访问，未分配桶返回 None。Extend 从零开始覆盖。
 - `get`、`slice` 和 `segments` 只提供共享引用；`get_mut`、`alloc`、`set` 要求独占数组。
@@ -73,4 +73,12 @@ unsafe { &*ptr }.store(7, Ordering::Relaxed);
 assert_eq!(slots[33].load(Ordering::Relaxed), 7);
 ```
 
-测试位于 tests/，已在 nightly i686 默认与 rc 配置的 Debug/Release 模式验证。当前 stable 构建受 pi_share 0.6 的 nightly 特性阻塞；本次未运行 Miri 或性能基准，不宣称未经测量的纳秒指标。
+## 0.31.1 修复与验证
+
+0.31.0 在取得 Box 切片缓存指针后移动 Box，Stacked Borrows 的 Unique retag 会使缓存 tag 失效。仅将所有者放进 `UnsafeCell<Box<[T]>>` 不改变 pointee 所有权；本次实测 `Box<[UnsafeCell<T>]>` 移动后也仍失败。0.31.1 改用上述显式 boxed-slice owner，移动数组只移动裸所有者，不重新借用元素。借用访问不构造覆盖整个连续区的可变切片；Clone 的共享切片仅存在于克隆调用期间，仍要求没有冲突写入。
+
+保留 Box 切片的长度元数据、紧凑布局和原分配，无每元素大小开销。扩容与整理临时恢复 Vec，仍初始化完整扩容容量后转回 boxed slice；精确初始化、显式 resize、首桶零拷贝接管、ZST 和 panic 回收语义不变。0.31.1 仅完成本地修复，未执行 publish。
+
+在 `nightly-2026-08-17-i686-pc-windows-gnu` 验证默认/rc 的 Debug、Release，以及 Miri Stacked Borrows、Tree Borrows 全量测试：每配置 25 个集成测试和 2 个 compile-fail 文档测试通过。pi_arr 未使用 `-Zmiri-ignore-leaks`。新增回归覆盖数组移动、Vec 重分配、旧裸指针、不相交借用和 Clone 后源指针访问；现有用例覆盖容量、Default/Clone/Drop panic 和 ZST。
+
+当前 stable 构建受 pi_share 0.6 的 nightly 特性阻塞。Miri 的两种借用模型仍属实验模型，测试通过不是所有 unsafe 路径无 UB 的形式证明；未运行单独的 pi_arr 性能基准，不作 pi_arr 性能结论。pi_slot README 另记录使用本地 pi_arr 0.31.1 的预分配槽表微基准，该结果不是 pi_arr 修复前后的独立对照，也不覆盖数组增长、整理或分配/析构成本。
