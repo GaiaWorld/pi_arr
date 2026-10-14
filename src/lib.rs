@@ -39,6 +39,10 @@ pub type Arr<T> = SegmentedArr<T>;
 pub type Iter<'a, T> = ContiguousIter<'a, T>;
 #[cfg(not(feature = "rc"))]
 pub type Iter<'a, T> = BucketIter<'a, T>;
+#[cfg(feature = "rc")]
+pub type IterMut<'a, T> = ContiguousIterMut<'a, T>;
+#[cfg(not(feature = "rc"))]
+pub type IterMut<'a, T> = SegmentedIterMut<'a, T>;
 
 /// 已初始化的连续区与稳定地址桶，无逻辑长度；Extend 从零覆盖。
 pub struct SegmentedArr<T> {
