@@ -1,6 +1,6 @@
 [package]
 name = "pi_arr"
-version = "0.31.1"
+version = "0.31.2"
 authors = ["zmax <zmax@gaia.world>"]
 edition = "2021"
 description = "lock-free & auto-expansion array"
@@ -9,9 +9,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["pi", "array", "pi_arr"]
 
 [dependencies]
-pi_share = "0.6"
-pi_vec_remain = { version = "0.2", path = "../pi_vec_remain" }
-pi_buckets = { version = "0.3.1", path = "../pi_buckets" }
+pi_share = "2.0"
+pi_vec_remain = "0.2"
+pi_buckets = "0.3"
 
 [features]
 rc = ["pi_share/rc"]

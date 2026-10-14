@@ -12,7 +12,7 @@
 //! arr.insert(0, 1);
 //! ```
 
-use pi_buckets::{BucketIter, BucketSegments, Buckets, Location, MAX_ENTRIES, SKIP};
+use pi_buckets::{BucketIter, BucketIterMut, BucketSegments, Buckets, Location, MAX_ENTRIES, SKIP};
 use pi_vec_remain::VecRemain;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::{replace, size_of, take};
@@ -142,6 +142,52 @@ impl<T> SegmentedArr<T> {
     }
     pub fn segments(&self, range: Range<usize>) -> BucketSegments<'_, T> {
         self.slice(range).into_segments()
+    }
+    /// Exclusively visit initialized elements in the range, including allocated
+    /// bucket defaults. Unallocated buckets are skipped; indexes are absolute.
+    pub fn slice_mut(&mut self, range: Range<usize>) -> SegmentedIterMut<'_, T> {
+        let prefix_len = self.storage.len();
+        assert!(range.start <= range.end, "reversed range");
+        assert!(
+            range.end.saturating_sub(prefix_len) <= MAX_ENTRIES + 1,
+            "exceeded maximum range"
+        );
+        let start = range.start.min(prefix_len);
+        let end = range.end.min(prefix_len);
+        // Exclusive self borrow covers both disjoint allocations for the iterator.
+        let prefix = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), end - start) };
+        let buckets = self.buckets.slice_mut(
+            range.start.saturating_sub(prefix_len)..range.end.saturating_sub(prefix_len),
+        );
+        SegmentedIterMut {
+            prefix: prefix.iter_mut(),
+            buckets,
+            prefix_index: start,
+            prefix_len,
+        }
+    }
+    pub fn iter_mut(&mut self) -> SegmentedIterMut<'_, T> {
+        let end = self.storage.len().saturating_add(MAX_ENTRIES + 1);
+        self.slice_mut(0..end)
+    }
+}
+/// Indexed exclusive scan of the initialized prefix and allocated buckets.
+pub struct SegmentedIterMut<'a, T> {
+    prefix: std::slice::IterMut<'a, T>,
+    buckets: BucketIterMut<'a, T>,
+    prefix_index: usize,
+    prefix_len: usize,
+}
+impl<'a, T> Iterator for SegmentedIterMut<'a, T> {
+    type Item = (usize, &'a mut T);
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(value) = self.prefix.next() {
+            let index = self.prefix_index;
+            self.prefix_index += 1;
+            return Some((index, value));
+        }
+        let index = self.buckets.next_index()? + self.prefix_len;
+        self.buckets.next().map(|value| (index, value))
     }
 }
 impl<T: Default> SegmentedArr<T> {
@@ -441,6 +487,21 @@ impl<T> ContiguousArr<T> {
             index: start,
         }
     }
+    /// Exclusively visits the initialized portion of the requested range.
+    /// Growth cannot overlap the iterator or references returned from it.
+    pub fn slice_mut(&mut self, range: Range<usize>) -> ContiguousIterMut<'_, T> {
+        assert!(range.start <= range.end, "reversed range");
+        let end = range.end.min(self.len.get());
+        let start = range.start.min(end);
+        let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr.get().add(start), end - start) };
+        ContiguousIterMut {
+            iter: slice.iter_mut(),
+            index: start,
+        }
+    }
+    pub fn iter_mut(&mut self) -> ContiguousIterMut<'_, T> {
+        self.slice_mut(0..self.len.get())
+    }
     pub fn segments(&self, range: Range<usize>) -> impl Iterator<Item = &[T]> {
         let iter = self.slice(range);
         let slice = iter.iter.as_slice();
@@ -631,6 +692,25 @@ impl<'a, T> Iterator for ContiguousIter<'a, T> {
 }
 impl<T> ExactSizeIterator for ContiguousIter<'_, T> {}
 
+/// Indexed exclusive iteration over a contiguous array.
+pub struct ContiguousIterMut<'a, T> {
+    iter: std::slice::IterMut<'a, T>,
+    index: usize,
+}
+impl<'a, T> Iterator for ContiguousIterMut<'a, T> {
+    type Item = (usize, &'a mut T);
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.iter.next()?;
+        let index = self.index;
+        self.index += 1;
+        Some((index, value))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+impl<T> ExactSizeIterator for ContiguousIterMut<'_, T> {}
+
 macro_rules! impl_array_traits {
     ($name:ident) => {
         impl<T> Index<usize> for $name<T> {
@@ -664,12 +744,58 @@ macro_rules! impl_array_traits {
 impl_array_traits!(SegmentedArr);
 impl_array_traits!(ContiguousArr);
 
-/// 从裸指针接管 Vec 所有权；内部实现不使用此方法。
-/// # Safety
-/// ptr 必须是以 Vec<T> 的布局与分配器分配的唯一所有者，分配容量恰为 len，
-/// 前 len 个元素已初始化。满足 Vec::from_raw_parts 的全部前提（包括 ZST），
-/// 不得仍有引用、另一所有者或再次释放该分配。即使 len 为零也要求非空对齐指针。
-pub unsafe fn to_vec<T>(ptr: *mut T, len: usize) -> Vec<T> {
-    // 所有原始分配、布局与唯一所有权前提由调用方保证。
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
+#[cfg(test)]
+mod mutable_iteration_tests {
+    use super::{ContiguousArr, SegmentedArr};
+
+    #[test]
+    fn slice_mut_preserves_absolute_indexes_across_unallocated_buckets() {
+        let mut arr = SegmentedArr::<usize>::with_capacity(2);
+        *arr.alloc(0) = 10;
+        *arr.alloc(258) = 20;
+        let mut iter = arr.slice_mut(0..260);
+        let (first_index, first) = iter.next().unwrap();
+        let (second_index, second) = iter.next().unwrap();
+        assert_eq!((first_index, second_index), (0, 1));
+        *first = 11;
+        *second = 12;
+        let (next_index, next) = iter.next().unwrap();
+        assert_eq!(next_index, 226);
+        *next = 21;
+        let remaining: Vec<_> = iter.map(|(index, _)| index).collect();
+        assert_eq!(remaining, (227..260).collect::<Vec<_>>());
+        assert_eq!((arr[0], arr[1], arr[226], arr[258]), (11, 12, 21, 20));
+    }
+
+    #[test]
+    fn slice_mut_clips_to_requested_range_and_visits_allocated_defaults() {
+        let mut arr = SegmentedArr::<u32>::with_capacity(2);
+        *arr.alloc(3) = 3;
+        let entries: Vec<_> = arr.slice_mut(1..5).map(|(index, value)| (index, *value)).collect();
+        assert_eq!(entries, [(1, 0), (2, 0), (3, 3), (4, 0)]);
+    }
+
+    #[test]
+    fn contiguous_slice_mut_clips_and_keeps_disjoint_references() {
+        let mut arr = ContiguousArr::<u32>::with_capacity(3);
+        let mut iter = arr.slice_mut(1..usize::MAX);
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+        let (first_index, first) = iter.next().unwrap();
+        let (second_index, second) = iter.next().unwrap();
+        assert_eq!((first_index, second_index), (1, 2));
+        *first = 11;
+        *second = 12;
+        assert!(iter.next().is_none());
+        assert_eq!(arr[1], 11);
+        assert_eq!(arr[2], 12);
+        assert!(arr.slice_mut(4..9).next().is_none());
+        assert_eq!(arr.iter_mut().map(|(index, _)| index).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "reversed range")]
+    fn contiguous_slice_mut_rejects_reversed_range() {
+        let mut arr = ContiguousArr::<u32>::new();
+        let _ = arr.slice_mut(1..0);
+    }
 }
