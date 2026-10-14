@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["pi", "array", "pi_arr"]
 
 [dependencies]
-pi_share = "2.0"
+pi_share = "2.1"
 pi_vec_remain = "0.2"
 pi_buckets = "0.3"
 
