@@ -41,18 +41,17 @@ Default 或 Clone panic 时 RAII 回收已初始化值，克隆源始终保持�
 | `VBArr` | `SegmentedArr` |
 | `VecIter` | `ContiguousIter` |
 | `vec_capacity()` | `contiguous_len()` |
-| `set_vec_capacity(n)` | `resize_contiguous(n)`（仍为 unsafe） |
-| `VBArr::capacity(len)` | `SegmentedArr::capacity_for_len(len)` |
 
 移除连续实现中忽略参数的 `capacity(len)`，改用 `contiguous_len()`。`Arr` 与 `Iter` 的 feature 选择保持不变。
 
-非 ZST 的正常增长与整理保留 Vec 扩容产生的完整容量，多余槽位全部默认初始化，转回 Box 时不收缩。`contiguous_len()` 可能大于请求下限。ZST 仍保持有限长度；`with_capacity(n)` 和显式 `resize_contiguous(n)` 保持精确长度。
+0.32.0 移除 `SegmentedArr::capacity_for_len` 和 `ContiguousArr::resize_contiguous`；后者的增长需求可使用 `alloc(index)`，连续区实际长度通过 `contiguous_len()` 查询。
+
+非 ZST 的正常增长与整理保留 Vec 扩容产生的完整容量，多余槽位全部默认初始化，转回 Box 时不收缩。`contiguous_len()` 可能大于请求下限。ZST 仍保持有限长度；`with_capacity(n)` 保持精确长度。
 
 - 移除公开拥有所有权的 buckets 裸指针，外部不能替换或释放内部桶。
 - 共享可变方法改为 unsafe，须先证明完整别名与生命周期契约，不能机械增加 unsafe 块。
 - ContiguousIter::Item 从 &mut T 修正为 &T。
 - to_vec(ptr, len) 改为 unsafe，要求唯一所有权和准确的原 Vec 布局、容量；内部不再使用它。
-- ContiguousArr::resize_contiguous 保留 unsafe 签名，但实际调整初始化长度：增长默认初始化，缩小析构截去元素。
 - ZST 的 contiguous_len 返回有限的初始化长度，get 不再返回凭空构造的实例。
 - 当前依赖包括 pi_share 0.6、本地 ../pi_vec_remain 0.2 和 ../pi_buckets 0.3.1；pi_share 0.6 使用 nightly 特性。
 

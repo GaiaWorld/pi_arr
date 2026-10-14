@@ -117,10 +117,6 @@ fn prefix_bucket_iterator_segments_and_boundaries() {
     for i in [3, 34, 35, 98, 99, 226] {
         a.set(i, i);
     }
-    assert_eq!(a.capacity_for_len(3), 3);
-    assert_eq!(a.capacity_for_len(4), 35);
-    assert_eq!(a.capacity_for_len(35), 35);
-    assert_eq!(a.capacity_for_len(36), 99);
     assert_eq!(a.slice(1..3).copied().collect::<Vec<_>>(), [2, 4]);
     let parts = a.segments(1..101).collect::<Vec<_>>();
     assert_eq!(
@@ -574,11 +570,6 @@ fn growth_retains_full_contiguous_len_and_initializes_spare_slots() {
     assert_eq!(contiguous.get(0).unwrap() as *const usize, ptr);
     assert!(buckets.get(expected).is_none());
     assert!(shared.get(expected).is_none());
-    // Explicit length changes remain exact, including shrinking.
-    unsafe {
-        contiguous.resize_contiguous(3);
-    }
-    assert_eq!(contiguous.contiguous_len(), 3);
 }
 
 #[test]

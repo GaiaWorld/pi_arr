@@ -207,18 +207,6 @@ impl<T: Default> SegmentedArr<T> {
             buckets: Buckets::new(),
         }
     }
-    /// 给定元素数对应的连续区加完整桶容量；len 是长度而非索引。
-    pub fn capacity_for_len(&self, len: usize) -> usize {
-        if len <= self.storage.len() {
-            return self.storage.len();
-        }
-        self.storage
-            .len()
-            .checked_add(Location::bucket_capacity(Location::bucket(
-                len - self.storage.len() - 1,
-            )))
-            .expect("capacity overflow")
-    }
     #[inline(always)]
     pub fn alloc(&mut self, index: usize) -> &mut T {
         if index < self.storage.len() {
@@ -525,52 +513,36 @@ impl<T: Default> ContiguousArr<T> {
             len: Cell::new(capacity),
         }
     }
-    /// 改变已初始化长度，不伪造分配器容量。
-    /// # Safety
-    /// 保留此 unsafe 签名；self 独占，缩小会析构截去的元素，增长会默认初始化。
-    pub unsafe fn resize_contiguous(&mut self, len: usize) {
-        self.resize(len, false);
-    }
-    fn resize(&mut self, len: usize, retain_capacity: bool) {
-        if len == self.len.get() {
-            return;
-        }
-        let storage = self.storage.get_mut();
-        let vec = take(storage).into_vec();
-        // resize 的 Default 可 panic；先使缓存不再暴露可能失效的旧指针。
-        self.len.set(0);
-        self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
-        // 局部 guard 在 panic 时也更新缓存，保留 Vec 已成功初始化的部分。
-        struct Refresh<'a, T> {
-            vec: Vec<T>,
-            storage: &'a mut OwnedSlice<T>,
-            ptr: &'a Cell<*mut T>,
-            len: &'a Cell<usize>,
-        }
-        impl<T> Drop for Refresh<'_, T> {
-            fn drop(&mut self) {
-                let storage = OwnedSlice::from(take(&mut self.vec).into_boxed_slice());
-                self.ptr.set(storage.as_mut_ptr());
-                self.len.set(storage.len());
-                *self.storage = storage;
-            }
-        }
-        let mut guard = Refresh {
-            vec,
-            storage,
-            ptr: &self.ptr,
-            len: &self.len,
-        };
-        if retain_capacity {
-            guard.vec.reserve(len.saturating_sub(guard.vec.len()));
-            fill_capacity(&mut guard.vec, len);
-        } else {
-            guard.vec.resize_with(len, T::default);
-        }
-    }
     pub fn alloc(&mut self, index: usize) -> &mut T {
         if index >= self.len.get() {
-            self.resize(index.checked_add(1).expect("index overflow"), true);
+            let target = index.checked_add(1).expect("index overflow");
+            let storage = self.storage.get_mut();
+            let vec = take(storage).into_vec();
+            // Default may panic; the guard restores the initialized prefix and cached pointer.
+            self.len.set(0);
+            self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
+            struct Refresh<'a, T> {
+                vec: Vec<T>,
+                storage: &'a mut OwnedSlice<T>,
+                ptr: &'a Cell<*mut T>,
+                len: &'a Cell<usize>,
+            }
+            impl<T> Drop for Refresh<'_, T> {
+                fn drop(&mut self) {
+                    let storage = OwnedSlice::from(take(&mut self.vec).into_boxed_slice());
+                    self.ptr.set(storage.as_mut_ptr());
+                    self.len.set(storage.len());
+                    *self.storage = storage;
+                }
+            }
+            let mut guard = Refresh {
+                vec,
+                storage,
+                ptr: &self.ptr,
+                len: &self.len,
+            };
+            guard.vec.reserve(target.saturating_sub(guard.vec.len()));
+            fill_capacity(&mut guard.vec, target);
         }
         // self 独占且扩容后元素已初始化。
         unsafe { &mut *self.ptr.get().add(index) }
@@ -650,7 +622,9 @@ impl<T: Default> ContiguousArr<T> {
         self.len.set(0);
         self.ptr.set(std::ptr::NonNull::dangling().as_ptr());
         drop(old);
-        self.resize(target, true);
+        if target > 0 {
+            self.alloc(target - 1);
+        }
     }
 }
 impl<T: Clone> Clone for ContiguousArr<T> {
